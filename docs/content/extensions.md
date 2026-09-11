@@ -37,6 +37,14 @@ capability. A prefix ending in `.` matches any key beneath it (`role.` matches
 | Raw credentials | inbound tokens and minted delegated tokens | flow through plugin payloads, not the bag | `read_inbound_credentials`, `read_delegated_tokens` |
 | Candidate constraint | folded backend routing constraint from `restrict` effects | not a bag namespace — read by the host router | written by the policy engine |
 
+One field of the agent extension is carried but not flattened: the
+conversation history. `AgentExtension.conversation.history` is a list of CMF
+`Message`s, oldest first, the same type as the current turn's payload. No
+`agent.*` key exposes it, so an APL predicate cannot read it directly. A policy
+that needs to reason over earlier turns runs a plugin that declares
+`read_agent` and walks the typed turns itself;
+`reference/plugins/transcript-scanner` is a worked example.
+
 The request arguments and response body are also flattened, under `args.*` and
 `result.*`, and the route name is available as `route.key`. APL field pipelines
 (`args:` / `result:`) operate on those. Operator-maintained static attributes

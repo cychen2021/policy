@@ -45,8 +45,12 @@ pub fn extract_agent(agent: &AgentExtension, bag: &mut AttributeBag) {
         // `security.rs`, which documents the rule for the whole bridge.
         let topics: HashSet<String> = conv.topics.iter().cloned().collect();
         bag.set("agent.conversation.topics", topics);
-        // `history: Vec<Value>` is deliberately not flattened — too unstructured.
-        // Policies wanting conversation history should call a plugin.
+        // `history: Vec<Message>` is deliberately not flattened. A transcript
+        // has no fixed shape a flat key could name, and copying every turn
+        // onto every request's bag would cost more than any predicate here
+        // could use. A policy that reasons over history calls a plugin that
+        // declares `read_agent` and reads the typed turns directly; see
+        // `reference/plugins/transcript-scanner`.
     }
 }
 
@@ -89,5 +93,42 @@ mod tests {
         );
         assert!(bag.set_contains("agent.conversation.topics", "payroll"));
         assert!(!bag.contains("agent.parent_agent_id"));
+    }
+
+    /// History reaches plugins, not the bag. Nothing a turn holds may surface
+    /// under any key, so a policy cannot come to depend on a flattening this
+    /// bridge does not promise.
+    #[test]
+    fn history_is_not_flattened_into_the_bag() {
+        use praxis_policy_apl_core::AttributeValue;
+        use praxis_policy_core::cmf::{Message, Role};
+
+        let agent = AgentExtension {
+            conversation: Some(ConversationContext {
+                history: vec![
+                    Message::text(Role::User, "turn-zero-text"),
+                    Message::text(Role::Assistant, "turn-one-text"),
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut bag = AttributeBag::new();
+        extract_agent(&agent, &mut bag);
+
+        let keys: Vec<&str> = bag.iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            keys,
+            vec!["agent.conversation.topics"],
+            "a conversation with only history contributes only the topics set"
+        );
+        for (_, v) in bag.iter() {
+            if let AttributeValue::String(s) = v {
+                assert!(
+                    !s.contains("turn-"),
+                    "history text leaked into the bag: {s}"
+                );
+            }
+        }
     }
 }

@@ -20,6 +20,11 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - Added PPE documentation ([#82](https://github.com/praxis-proxy/policy/pull/82))
+- **`reference/plugins/transcript-scanner`**, a worked example of a plugin that reads typed conversation history through `read_agent` and denies with `transcript.detected` when a prior turn matches a configured pattern. ([#70](https://github.com/praxis-proxy/policy/issues/70))
+
+### Changed
+
+- **Breaking: `ConversationContext.history` is `Vec<Message>`, was `Vec<serde_json::Value>`.** Each entry is a CMF message, the same type as the current turn's payload. A host that sent free-form summary objects must now send turns in CMF message shape; anything else fails to deserialize rather than being carried unread. History is still not flattened into the attribute bag; policy reaches it through a plugin. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 
 ## [0.2.0] - 2026-09-03
 

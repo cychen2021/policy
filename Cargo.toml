@@ -31,6 +31,7 @@ members = [
     # why it is not a builtin.
     "reference/plugins/pii-scanner",
     "reference/plugins/audit-logger",
+    "reference/plugins/transcript-scanner",
 ]
 
 # The session store pulls a redis client and a TLS stack, which slows a default
@@ -56,6 +57,7 @@ default-members = [
     # why it is not a builtin.
     "reference/plugins/pii-scanner",
     "reference/plugins/audit-logger",
+    "reference/plugins/transcript-scanner",
 ]
 
 [workspace.package]
