@@ -55,6 +55,7 @@ predicate. The scalars flatten to `llm.max_tokens`, `llm.temperature`,
 enough to pin a known prompt; a plugin reads the text from the extension. When
 the host reports no request, none of these keys exist, so a rule that must fail
 closed on an unreported request tests `exists(llm.offered_tools)`.
+[LLM Routes](llm-routes.md) lists every key an `llm:` route reads, per phase.
 
 The request arguments and response body are also flattened, under `args.*` and
 `result.*`, and the route name is available as `route.key`. APL field pipelines
