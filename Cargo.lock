@@ -2395,6 +2395,7 @@ dependencies = [
  "praxis-policy-apl-core",
  "praxis-policy-core",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
