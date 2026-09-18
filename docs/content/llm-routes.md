@@ -191,6 +191,7 @@ After the call, it refuses a completion that was cut off at the token limit or
 that spent more than 20000 tokens.
 
 A model outside `gpt-4*` matches no route here, so none of this applies to it.
+`visitor_e2e` runs this block against the engine, so it is kept working.
 
 ## Next
 

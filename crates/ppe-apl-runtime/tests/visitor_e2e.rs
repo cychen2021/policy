@@ -42,7 +42,8 @@ use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::{PluginError as CoreError, PluginViolation};
 use praxis_policy_core::extensions::{
-    LLMExtension, LLMRequest, MetaExtension, SecurityExtension, SubjectExtension, ToolMetadata,
+    CompletionExtension, LLMExtension, LLMRequest, MetaExtension, SecurityExtension, StopReason,
+    SubjectExtension, TokenUsage, ToolMetadata,
 };
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
@@ -1387,5 +1388,92 @@ routes:
     assert!(
         !llm_input_allowed(&mgr, llm_ext(None, &[])).await,
         "an unreported request must deny"
+    );
+}
+
+/// An engine loaded with the one-route `llm: "gpt-4*"` config that
+/// `docs/content/llm-routes.md` shows under `## Worked config`, read from that
+/// file so the example and these tests cannot drift apart. Moving the block or
+/// renaming its heading fails the tests that use this on purpose.
+///
+/// Before the call the route denies, among other things, a request the host
+/// did not report. After the call it denies a completion stopped at the token
+/// limit or using more than 20000 tokens in total.
+async fn gpt4_route_engine() -> Arc<PolicyEngine> {
+    let page = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/content/llm-routes.md"
+    ))
+    .expect("read docs/content/llm-routes.md");
+    let (_, after) = page
+        .split_once("## Worked config")
+        .expect("docs/content/llm-routes.md has a `## Worked config` section");
+    let (_, block) = after
+        .split_once("```yaml\n")
+        .expect("a yaml block follows the heading");
+    let (yaml, _) = block.split_once("\n```").expect("a closed yaml block");
+    build_manager_with_visitor(yaml).await
+}
+
+/// `gpt-4*` covers `gpt-4o` and not `claude-sonnet-4`. Both are sent the same
+/// request, one the host did not report, which the route denies with
+/// `!exists(llm.offered_tools): deny`. The deny shows the route applied to
+/// `gpt-4o`; the allow shows no route applied to `claude-sonnet-4`. The
+/// route's literal name is `gpt-4*`, so `gpt-4o` can only reach it through the
+/// pattern.
+#[tokio::test]
+async fn llm_route_glob_applies_only_to_matching_models() {
+    let mgr = gpt4_route_engine().await;
+
+    for (model, applies) in [("gpt-4o", true), ("claude-sonnet-4", false)] {
+        let mut ext = llm_ext(None, &[]);
+        ext.meta = Some(Arc::new(meta_for_entity("llm", model)));
+        assert_eq!(
+            !llm_input_allowed(&mgr, ext).await,
+            applies,
+            "{model}: does the gpt-4* route apply"
+        );
+    }
+}
+
+/// The two post-call rules, each broken on its own, on `cmf.llm_output`. The
+/// request is left unreported: the pre-call rule that denies that does not run
+/// after the call, so the passing case also shows the phases are kept apart.
+#[tokio::test]
+async fn llm_route_enforces_completion_constraints() {
+    let mgr = gpt4_route_engine().await;
+
+    let answer = |stop: StopReason, total: u32| {
+        let mgr = Arc::clone(&mgr);
+        let mut ext = llm_ext(None, &[]);
+        ext.meta = Some(Arc::new(meta_for_entity("llm", "gpt-4o")));
+        ext.completion = Some(Arc::new(CompletionExtension {
+            stop_reason: Some(stop),
+            tokens: Some(TokenUsage {
+                input_tokens: total / 2,
+                output_tokens: total - total / 2,
+                total_tokens: total,
+            }),
+            ..Default::default()
+        }));
+        async move {
+            let (r, _bg) = mgr
+                .invoke_named::<CmfHook>("cmf.llm_output", cmf_payload("answer"), ext, None)
+                .await;
+            r.continue_processing
+        }
+    };
+
+    assert!(
+        answer(StopReason::End, 1000).await,
+        "a completion breaking no rule passes"
+    );
+    assert!(
+        !answer(StopReason::MaxTokens, 1000).await,
+        "a completion stopped at the token limit must deny"
+    );
+    assert!(
+        !answer(StopReason::End, 30000).await,
+        "a completion over 20000 total tokens must deny"
     );
 }
