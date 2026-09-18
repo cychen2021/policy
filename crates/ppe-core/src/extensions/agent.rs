@@ -125,8 +125,10 @@ mod tests {
         assert_eq!(conv.summary.as_deref(), Some("hr inquiry"));
     }
 
-    /// A history turn in the wire shape of a CMF message deserializes, with
-    /// the schema version defaulted as it is on a live message.
+    /// A history turn written as the JSON form of a Common Message Format
+    /// (CMF) `Message`, the type every hook payload uses, deserializes:
+    /// `{"role": "user", "content": [...]}`. `schema_version` may be omitted
+    /// and is defaulted exactly as it is on the current turn's message.
     #[test]
     fn a_cmf_shaped_turn_deserializes() {
         let conv: ConversationContext = serde_json::from_value(json!({

@@ -45,12 +45,14 @@ pub fn extract_agent(agent: &AgentExtension, bag: &mut AttributeBag) {
         // `security.rs`, which documents the rule for the whole bridge.
         let topics: HashSet<String> = conv.topics.iter().cloned().collect();
         bag.set("agent.conversation.topics", topics);
-        // `history: Vec<Message>` is deliberately not flattened. A transcript
-        // has no fixed shape a flat key could name, and copying every turn
-        // onto every request's bag would cost more than any predicate here
-        // could use. A policy that reasons over history calls a plugin that
-        // declares `read_agent` and reads the typed turns directly; see
-        // `reference/plugins/transcript-scanner`.
+        // `history` is `Vec<Message>`, the CMF type the host already builds for
+        // the current turn, so a plugin reads a past turn with the same
+        // `ContentPart` code it uses on the payload, and a malformed turn fails
+        // at deserialization rather than reaching a plugin as opaque JSON.
+        // It is not written into the bag: bag values are scalars and string
+        // sets, and a turn's nested content parts have no flat key to live
+        // under. A policy that needs history calls a plugin holding
+        // `read_agent`; see `reference/plugins/transcript-scanner`.
     }
 }
 
@@ -109,18 +111,28 @@ mod tests {
                     Message::text(Role::User, "turn-zero-text"),
                     Message::text(Role::Assistant, "turn-one-text"),
                 ],
-                ..Default::default()
+                summary: None,
+                topics: vec![],
             }),
             ..Default::default()
         };
         let mut bag = AttributeBag::new();
         extract_agent(&agent, &mut bag);
 
+        // The topics key is still written, as an empty set: the bridge emits
+        // it whenever a conversation is present (see the empty-set note in
+        // `security.rs`). It is the only key history-only input may produce.
         let keys: Vec<&str> = bag.iter().map(|(k, _)| k).collect();
         assert_eq!(
             keys,
             vec!["agent.conversation.topics"],
             "a conversation with only history contributes only the topics set"
+        );
+        assert!(
+            bag.get_string_set("agent.conversation.topics")
+                .expect("topics is a string set")
+                .is_empty(),
+            "no topics were given, so the set is empty"
         );
         for (_, v) in bag.iter() {
             if let AttributeValue::String(s) = v {
