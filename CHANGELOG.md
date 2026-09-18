@@ -19,7 +19,6 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- Added PPE documentation ([#82](https://github.com/praxis-proxy/policy/pull/82))
 - **`reference/plugins/transcript-scanner`**, a worked example of a plugin that reads typed conversation history through `read_agent` and denies with `transcript.detected` when a prior turn matches a configured pattern. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - **`llm:` routes can see the request.** `LLMExtension.request` carries the system prompt, the offered tool definitions, tool choice, `max_tokens`, `temperature`, `top_p`, stop sequences, and the streaming flag. The bag gains `llm.offered_tools` (a set of tool names), the scalars, and `llm.system_prompt_digest` (`sha256:<hex>`), so `"llm.offered_tools contains 'send_email' & !subject.roles contains 'finance': deny"` and a system-prompt pin are config lines. `LLMExtension` gains a public field, which breaks a host that builds it with an exhaustive struct literal. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - **`docs/content/llm-routes.md` documents what an `llm:` route can read**, before and after the call: the message text, the `llm.*`, `agent.*` and `completion.*` keys, what stays out of the bag and how to reach it, how a missing key behaves when the host did not report the request, and what the host must supply. Its worked config is run against the engine by `visitor_e2e`, so the page cannot drift from the behaviour it describes. ([#70](https://github.com/praxis-proxy/policy/issues/70))
@@ -27,6 +26,49 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - **Breaking: `ConversationContext.history` is `Vec<Message>`, was `Vec<serde_json::Value>`.** Each entry is a CMF message, the same type as the current turn's payload. A host that sent free-form summary objects must now send turns in CMF message shape; anything else fails to deserialize rather than being carried unread. History is still not flattened into the attribute bag; policy reaches it through a plugin. ([#70](https://github.com/praxis-proxy/policy/issues/70))
+
+## [0.3.0] - 2026-09-18
+
+### Added
+
+- Added comprehensive PPE documentation and tested examples. ([#82](https://github.com/praxis-proxy/policy/pull/82))
+- Documented the CMF extension bag contract and expanded cross-PDP conformance
+  tests. ([#59](https://github.com/praxis-proxy/policy/pull/59))
+- Added a catalog of fail-closed safety invariants with fault-injection tests.
+  ([#71](https://github.com/praxis-proxy/policy/pull/71))
+- Added Criterion benchmarks for hook dispatch, full decisions, throughput,
+  PDP evaluation, and session memory. ([#35](https://github.com/praxis-proxy/policy/pull/35))
+
+### Changed
+
+- Updated `base64`, CEL, Redis, deadpool-redis, UUID, and related dependencies.
+  ([#111](https://github.com/praxis-proxy/policy/pull/111))
+
+### Removed
+
+- Removed the unused public `BAG_WORKLOAD_PREFIX` constant. ([#59](https://github.com/praxis-proxy/policy/pull/59))
+
+### Fixed
+
+- Contained serial, transform, audit, and PDP panics through `on_error`; cancelled
+  requests now abort spawned work and preserve prior plugin state. ([#71](https://github.com/praxis-proxy/policy/pull/71))
+- Made the `ppe-core` self-test dependency path-only so release packaging can
+  resolve it. ([#71](https://github.com/praxis-proxy/policy/pull/71))
+- Corrected `read_labels` and `read_workload` capability namespaces to match the
+  keys emitted by the CMF bridge. ([#59](https://github.com/praxis-proxy/policy/pull/59))
+
+### Security
+
+- Redacted inline PEM keys and HMAC secrets from identity configuration debug
+  output. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- Updated `rustls` to 0.23.45 for RUSTSEC-2026-0285. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+
+### Internal
+
+- Raised line coverage above 96% and made the LCOV artifact match the gated run.
+  ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- Added multithreaded engine stress tests, a Loom memory-ordering model, and a
+  nightly ThreadSanitizer job. ([#60](https://github.com/praxis-proxy/policy/pull/60))
 
 ## [0.2.0] - 2026-09-03
 
@@ -329,7 +371,7 @@ First release. The engine was extracted from another project rather than written
 
 ### Added
 
-- **The policy engine, ported from [`contextforge-org/cpex`](https://github.com/contextforge-org/cpex) with history intact.** Extracted with `git-filter-repo` at source commit `aed0f15`, 192 files across 37 filtered commits, so `git log` and `git blame` reach back before this repository existed. The Rego decision point came in a second pass from `fa222c4`. [`docs/port-provenance.md`](docs/port-provenance.md) records both anchors, which is what any later comparison between the two trees needs.
+- **The policy engine, ported from [`contextforge-org/cpex`](https://github.com/contextforge-org/cpex) with history intact.** Extracted with `git-filter-repo` at source commit `aed0f15`, 192 files across 37 filtered commits, so `git log` and `git blame` reach back before this repository existed. The Rego decision point came in a second pass from `fa222c4`. [`docs/dev/port-provenance.md`](docs/dev/port-provenance.md) records both anchors, which is what any later comparison between the two trees needs.
 
 - **`praxis-policy`, a host facade.** One dependency instead of a dozen. It re-exports the runtime (`PolicyEngine`, `AplOptions`, `register_apl`) and owns registration of the bundled extensions, each behind its own feature. `default` is empty, so the bare dependency is the engine alone with nothing extra compiled in; `builtins` turns on the whole set, or name a subset (`jwt`, `oauth`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`).
 
@@ -369,8 +411,9 @@ First release. The engine was extracted from another project rather than written
 
 - **Line coverage at 95%,** gated in CI by `COVERAGE_FLOOR` so it cannot silently regress. The `nbf` gap and the Cedar float defect both surfaced while writing those tests, which is the argument for the exercise.
 
-- **191 lint rules configured across rustc, clippy and rustdoc,** every one at an explicit level. Anything that could silently change an enforcement decision is denied; [`docs/lints.md`](docs/lints.md) explains each group that is not.
+- **191 lint rules configured across rustc, clippy and rustdoc,** every one at an explicit level. Anything that could silently change an enforcement decision is denied; [`docs/dev/lints.md`](docs/dev/lints.md) explains each group that is not.
 
-[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/praxis-proxy/policy/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/praxis-proxy/policy/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/praxis-proxy/policy/releases/tag/v0.1.0

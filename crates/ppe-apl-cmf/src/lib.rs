@@ -45,6 +45,9 @@
 //! Each bridge is a pure function that reads one typed source and writes flat
 //! keys into a borrowed bag: no async, no I/O. This crate defines which keys a
 //! policy author may reference, so adding one here widens the language.
+//!
+//! The absent-value contract, the original-vs-flattened relationship, and the
+//! per-slot catalog are in `docs/content/cmf-extensions.md`.
 
 /// Bridges agent session and lineage into `agent.*` keys.
 pub mod agent;
@@ -64,7 +67,7 @@ pub mod extensions_bridge;
 pub mod framework;
 /// Bridges request and response headers into `http.*` keys.
 pub mod http;
-/// Bridges model identity into `llm.*` keys.
+/// Bridges model identity, and the request when reported, into `llm.*` keys.
 pub mod llm;
 /// Bridges tool and resource metadata into `mcp.*` keys.
 pub mod mcp;
