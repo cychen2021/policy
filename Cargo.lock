@@ -2673,8 +2673,8 @@ dependencies = [
  "praxis-policy-pdp-cedar-direct",
  "praxis-policy-pdp-cel",
  "praxis-policy-pdp-opa",
- "serde_yaml",
  "tokio",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2711,10 +2711,10 @@ dependencies = [
  "praxis-policy-session-valkey",
  "rustls",
  "serde_json",
- "serde_yaml",
  "tokio",
  "tower-service",
  "webpki-roots",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2739,10 +2739,10 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "serde_yaml",
  "thiserror",
  "tokio",
  "tracing",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2756,11 +2756,11 @@ dependencies = [
  "praxis-policy-core",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2",
  "thiserror",
  "tokio",
  "tracing",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2778,13 +2778,13 @@ dependencies = [
  "praxis-policy-orchestration",
  "serde",
  "serde_json",
- "serde_yaml",
  "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
  "uuid",
  "wildmatch",
+ "yaml_serde",
  "zeroize",
 ]
 
@@ -2807,10 +2807,10 @@ dependencies = [
  "praxis-policy-apl-runtime",
  "praxis-policy-core",
  "serde_json",
- "serde_yaml",
  "stacker",
  "thiserror",
  "tokio",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2822,10 +2822,10 @@ dependencies = [
  "praxis-policy-apl-core",
  "praxis-policy-apl-runtime",
  "praxis-policy-core",
- "serde_yaml",
  "thiserror",
  "tokio",
  "tracing",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2838,8 +2838,8 @@ dependencies = [
  "praxis-policy-pdp-cedar-direct",
  "praxis-policy-pdp-cel",
  "praxis-policy-pdp-opa",
- "serde_yaml",
  "tokio",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2852,10 +2852,10 @@ dependencies = [
  "praxis-policy-core",
  "regorus",
  "serde_json",
- "serde_yaml",
  "thiserror",
  "tokio",
  "tracing",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2944,7 +2944,6 @@ dependencies = [
  "praxis-policy-apl-runtime",
  "redis",
  "serde",
- "serde_yaml",
  "sha2",
  "testcontainers",
  "testcontainers-modules",
@@ -2952,6 +2951,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "yaml_serde",
 ]
 
 [[package]]

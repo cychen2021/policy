@@ -97,7 +97,8 @@ readme = "README.md"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive", "rc"] }
-serde_yaml = "0.9"
+# NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.
+serde_yaml = { package = "yaml_serde", version = "0.10.4" }
 serde_json = "1"
 async-trait = "0.1"
 # HTTP types only (no client, no I/O) for the `HttpTransport` seam in
