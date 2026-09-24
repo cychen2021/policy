@@ -22,6 +22,19 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - Documented how to add and test provider-specific JWT claim mapper presets.
   ([#128](https://github.com/praxis-proxy/policy/pull/128))
 
+### Changed
+
+- Moved the configurable identity claim mapper from
+  `praxis-policy-plugin-identity-jwt` to `praxis_policy_core::identity::mapping`.
+  **Breaking for Rust callers using the JWT plugin's module paths**
+  (`claim_map_config`, `claim_path`, `configured_mapper`, or
+  `claim_map::{ClaimMap, ClaimMapper}`): import those items from core instead.
+  `ConfiguredClaimMap::new` now requires a `MappingProfile` with the reserved
+  names and attestor for the verified credential; JWT callers can use
+  `praxis_policy_plugin_identity_jwt::claim_map::JWT_MAPPING_PROFILE`.
+  The JWT plugin's crate-root re-exports and the operator's `claim_map:` config
+  remain available. ([#119](https://github.com/praxis-proxy/policy/pull/119))
+
 ### Fixed
 
 - Prevented dotted subject and client membership names from creating ambiguous
