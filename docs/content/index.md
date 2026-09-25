@@ -66,6 +66,8 @@ history.
   what an `llm:` route can read before and after the call, with a worked config
 - [Identity and Delegation](identity-delegation.md):
   inbound identity slots, outbound delegation subjects, and six recipes
+- [Identity Claim Mapping](identity-claim-mapping.md):
+  adding and testing a provider-specific JWT claim mapper preset
 - [Header Assertions](assertions.md):
   projecting derived identity onto upstream requests
 - [Deployment](deployment.md):

@@ -9,9 +9,14 @@ collaborator, co-author, or signatory. Commit
 sign-off belongs to the human contributor responsible
 for the change.
 
+## Commits
+
+Use short Conventional Commit subjects. Always create commits with `-s` so
+the responsible human contributor signs off. Do not add AI tool trailers.
+
 ## Requirements
 
-- Rust stable 1.96+ (pinned in `rust-toolchain.toml`)
+- Rust stable 1.92+ (development toolchain pinned in `rust-toolchain.toml`)
 - No nightly required (formatting uses stable)
 
 ## Quick Reference
@@ -63,6 +68,7 @@ builtins/
                 elicitation-ciba
   pdps/         cedar-direct, cel, opa
   session/      valkey
+  secrets/      vault
 
 reference/
   plugins/      pii-scanner, audit-logger,

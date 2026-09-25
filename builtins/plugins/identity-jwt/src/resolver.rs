@@ -59,13 +59,14 @@ use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::identity::{IdentityHook, IdentityPayload};
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
-use super::claim_map::{ClaimMap, ClaimMapper};
-use super::claim_map_config::{ClaimsOverrides, CompiledClaimsOverrides};
+use super::claim_map::JWT_MAPPING_PROFILE;
 use super::config::{
     JwksFetch, JwksFetchBudget, JwtIdentityResolverConfig, KeySourceError, TrustedIssuerConfig,
 };
-use super::configured_mapper::ConfiguredClaimMap;
 use super::presets;
+use praxis_policy_core::identity::mapping::ConfiguredClaimMap;
+use praxis_policy_core::identity::mapping::{ClaimMap, ClaimMapper};
+use praxis_policy_core::identity::mapping::{ClaimsOverrides, CompiledClaimsOverrides};
 
 /// How long a request that needs new keys waits for an in-flight
 /// refresh before giving up and denying.
@@ -318,7 +319,8 @@ impl JwtIdentityResolver {
             );
         }
 
-        let claim_mapper: Arc<dyn ClaimMapper> = Arc::new(ConfiguredClaimMap::new(compiled));
+        let claim_mapper: Arc<dyn ClaimMapper> =
+            Arc::new(ConfiguredClaimMap::new(compiled, JWT_MAPPING_PROFILE));
 
         if typed.header.trim().is_empty() {
             return Err(Box::new(PluginError::Config {
@@ -1513,7 +1515,7 @@ mod tests {
     /// guesses about a shape the provider does not mint.
     #[test]
     fn a_preset_without_a_workload_section_refuses_the_workload_role() {
-        for name in ["auth0", "cognito", "keycloak"] {
+        for name in ["auth0", "cognito", "ibmverify", "keycloak"] {
             let err = build_err(json!({"claim_mapper": name, "role": "workload"}));
             assert!(err.contains("workload"), "'{name}': {err}");
         }

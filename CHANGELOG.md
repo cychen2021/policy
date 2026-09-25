@@ -22,10 +22,41 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **`reference/plugins/transcript-scanner`**, a worked example of a plugin that reads typed conversation history through `read_agent` and denies with `transcript.detected` when a prior turn matches a configured pattern. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - **`llm:` routes can see the request.** `LLMExtension.request` carries the system prompt, the offered tool definitions, tool choice, `max_tokens`, `temperature`, `top_p`, stop sequences, and the streaming flag. The bag gains `llm.offered_tools` (a set of tool names), the scalars, and `llm.system_prompt_digest` (`sha256:<hex>`), so `"llm.offered_tools contains 'send_email' & !subject.roles contains 'finance': deny"` and a system-prompt pin are config lines. `LLMExtension` gains a public field, which breaks a host that builds it with an exhaustive struct literal. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - **`docs/content/llm-routes.md` documents what an `llm:` route can read**, before and after the call: the message text, the `llm.*`, `agent.*` and `completion.*` keys, what stays out of the bag and how to reach it, how a missing key behaves when the host did not report the request, and what the host must supply. Its worked config is run against the engine by `visitor_e2e`, so the page cannot drift from the behaviour it describes. ([#70](https://github.com/praxis-proxy/policy/issues/70))
+- Added the `ibmverify` JWT claim mapper preset for tenant-provisioned scalar or
+  array collection claims. ([#134](https://github.com/praxis-proxy/policy/pull/134))
+- Added the `identity/api-key` resolver with hash-indexed file and HTTP
+  directories, shared identity mapping, and bounded lookup caching. The facade
+  exposes it through the `api-key` feature.
+  ([#125](https://github.com/praxis-proxy/policy/pull/125))
+- Documented how to add and test provider-specific JWT claim mapper presets.
+  ([#128](https://github.com/praxis-proxy/policy/pull/128))
 
 ### Changed
 
 - **Breaking: `ConversationContext.history` is `Vec<Message>`, was `Vec<serde_json::Value>`.** Each entry is a CMF message, the same type as the current turn's payload. A host that sent free-form summary objects must now send turns in CMF message shape; anything else fails to deserialize rather than being carried unread. History is still not flattened into the attribute bag; policy reaches it through a plugin. ([#70](https://github.com/praxis-proxy/policy/issues/70))
+- Moved the configurable identity claim mapper from
+  `praxis-policy-plugin-identity-jwt` to `praxis_policy_core::identity::mapping`.
+  **Breaking for Rust callers using the JWT plugin's module paths**
+  (`claim_map_config`, `claim_path`, `configured_mapper`, or
+  `claim_map::{ClaimMap, ClaimMapper}`): import those items from core instead.
+  `ConfiguredClaimMap::new` now requires a `MappingProfile` with the reserved
+  names and attestor for the verified credential; JWT callers can use
+  `praxis_policy_plugin_identity_jwt::claim_map::JWT_MAPPING_PROFILE`.
+  The JWT plugin's crate-root re-exports and the operator's `claim_map:` config
+  remain available. ([#119](https://github.com/praxis-proxy/policy/pull/119))
+
+### Fixed
+
+- Prevented dotted subject and client membership names from creating ambiguous
+  flattened policy aliases. ([#126](https://github.com/praxis-proxy/policy/pull/126))
+
+## [0.3.1] - 2026-09-22
+
+### Changed
+
+- Lowered the MSRV to 1.92 to match Red Hat's rust-toolset, which the FIPS
+  build compiles against.
+- Upgraded the `cel` and `redis` dependencies.
 
 ## [0.3.0] - 2026-09-18
 
@@ -38,6 +69,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   ([#71](https://github.com/praxis-proxy/policy/pull/71))
 - Added Criterion benchmarks for hook dispatch, full decisions, throughput,
   PDP evaluation, and session memory. ([#35](https://github.com/praxis-proxy/policy/pull/35))
+- **Vault KV v2 secret backend**, behind the `secrets-vault` facade
+  feature. A `kind: vault` provider reads `<mount>/<path>#<field>` through
+  the host `HttpTransport` (no Vault SDK). Auth is Kubernetes or AppRole,
+  with no default. Token renewal is lazy on the next read — nothing
+  spawns a ticker — and a `403` reauthenticates once. Written against
+  the Vault 1.19 KV v2 HTTP API.
+  ([#94](https://github.com/praxis-proxy/policy/issues/94))
 
 ### Changed
 
@@ -69,6 +107,21 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   ([#86](https://github.com/praxis-proxy/policy/pull/86))
 - Added multithreaded engine stress tests, a Loom memory-ordering model, and a
   nightly ThreadSanitizer job. ([#60](https://github.com/praxis-proxy/policy/pull/60))
+
+### Changed
+
+- `execute_with_retry` is public so a `SecretProvider` that holds a host
+  transport can use the same retry policy as plugins.
+
+### Internal
+
+- **Line coverage floor raised to 96%.** `COVERAGE_FLOOR` in the `Makefile` is the gate. Parser error-return sites, `load_config_yaml` visitor refusals (`visit_route` / `visit_complete`), and the Valkey empty-append path are now tested. About 25 unreachable defensive guards still cap the number below 100. ([#14](https://github.com/praxis-proxy/policy/issues/14))
+- **The coverage artifact now measures the gated run.** The coverage job built `lcov.info` from a second, narrower run (default features, ignored tests skipped), so the uploaded report understated the number the floor asserted. `make coverage-lcov` measures once and derives both the floor check and the report from that data. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **Line coverage raised to 96.5%, and a secret leak closed on the way.** `DecodingKeySource`'s derived `Debug` printed inline PEM keys and HMAC secrets verbatim, and `TrustedIssuer`'s hand-written `Debug` forwarded that field while its comment claimed the key was elided, so any host logging its plugin list disclosed the signing secret. It now redacts the material and keeps the locator (path, JWKS URL). Tests cover the redaction on all five hand-written `Debug` impls, the non-blocking and timeout arms of every executor phase, `AplRouteHandler`'s wiring guards, and the Valkey endpoint error paths. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **`step_to_effect` no longer carries an unreachable branch.** A rule inside a `do:` list can only be conditional: `parse_predicate` never yields `Always`, and the spellings that build an unconditional rule are consumed upstream. The dead effect-count and no-effect arms are gone, replaced by an explicit refusal. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **A test that no longer tested its premise.** `a_rejected_load_drops_its_plugins_outside_the_writer_lock` was rejected by config validation before any factory ran, so the `Drop`-re-entrancy deadlock it guards was never exercised. It now loads under `dispatch: hooks` and asserts the instantiation count. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **`make coverage` cleans stale instrumented binaries first.** llvm-cov merges the mappings of every binary it finds, so one left by a run with a different feature set (or a cached `target/` in CI) was counted twice, inflating both the line count and the miss count. ([#86](https://github.com/praxis-proxy/policy/pull/86))
+- **`rustls` bumped to 0.23.45** for [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285): TLS 1.3 handshake messages packed after a key-changing message in the same record were accepted at the wrong encryption level. It reaches the shipped graph through `redis` and `deadpool-redis`, so this is a dependency bump rather than an advisory ignore. Lockfile only, one package, still MSRV 1.96. ([#86](https://github.com/praxis-proxy/policy/pull/86))
 
 ## [0.2.0] - 2026-09-03
 
@@ -413,7 +466,8 @@ First release. The engine was extracted from another project rather than written
 
 - **191 lint rules configured across rustc, clippy and rustdoc,** every one at an explicit level. Anything that could silently change an enforcement decision is denied; [`docs/dev/lints.md`](docs/dev/lints.md) explains each group that is not.
 
-[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/praxis-proxy/policy/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/praxis-proxy/policy/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/praxis-proxy/policy/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/praxis-proxy/policy/releases/tag/v0.1.0
