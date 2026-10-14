@@ -43,7 +43,41 @@ routes:
         - "run(transcript-scan)"
 "#;
 
+/// The layout `docs/content/llm-routes.md` recommends: the scan under
+/// `global.defaults.llm`, beside a route that names `gpt-4*`. Only one `llm:`
+/// route runs per request and `gpt-4*` beats `*`, so a scan on the `*` route
+/// alone would skip every gpt-4 model.
+const LAYERED_YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: transcript-scan
+    kind: validator/transcript-scan
+    hooks: [cmf.llm_input]
+    capabilities: [read_agent]
+    config:
+      patterns:
+        - name: api_key
+          regex: "sk-[A-Za-z0-9]{8,}"
+global:
+  defaults:
+    llm:
+      authorization:
+        pre_invocation:
+          - "run(transcript-scan)"
+routes:
+  - llm: "*"
+  - llm: "gpt-4*"
+    authorization:
+      pre_invocation:
+        - "llm.max_tokens > 4096: deny"
+"#;
+
 async fn engine() -> Arc<PolicyEngine> {
+    engine_with(YAML).await
+}
+
+async fn engine_with(yaml: &str) -> Arc<PolicyEngine> {
     let mgr = Arc::new(PolicyEngine::default());
     mgr.register_factory(KIND, Box::new(TranscriptScannerFactory));
     register_apl(
@@ -57,7 +91,7 @@ async fn engine() -> Arc<PolicyEngine> {
             base_capabilities: None,
         },
     );
-    mgr.load_config_yaml(YAML).expect("load_config_yaml");
+    mgr.load_config_yaml(yaml).expect("load_config_yaml");
     mgr.initialize().await.expect("initialize");
     mgr
 }
@@ -120,4 +154,31 @@ async fn clean_history_is_allowed() {
         "clean history should pass: {:?}",
         result.violation
     );
+}
+
+/// A gpt-4 request takes the `gpt-4*` route, not `*`, and is still scanned
+/// because the scan sits in the defaults every `llm:` route stacks onto.
+#[tokio::test]
+async fn the_default_scan_reaches_a_more_specific_route() {
+    let mgr = engine_with(LAYERED_YAML).await;
+    for model in ["gpt-4", "mistral-large"] {
+        let mut ext = llm_request(vec![Message::text(
+            Role::User,
+            "here is my key: sk-live0123456789",
+        )]);
+        ext.meta = Some(Arc::new(MetaExtension {
+            entity_type: Some("llm".to_owned()),
+            entity_name: Some(model.to_owned()),
+            ..Default::default()
+        }));
+
+        let (result, _bg) = mgr
+            .invoke_named::<CmfHook>("cmf.llm_input", payload(), ext, None)
+            .await;
+
+        let v = result
+            .violation
+            .unwrap_or_else(|| panic!("{model}: the scan must deny"));
+        assert_eq!(v.code, "transcript.detected", "{model}: {}", v.reason);
+    }
 }

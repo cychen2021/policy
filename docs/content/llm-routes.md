@@ -124,12 +124,22 @@ on the same value and is how a whole message is redacted.
           - name: api_key
             regex: "sk-[A-Za-z0-9]{8,}"
 
+  global:
+    defaults:
+      llm:
+        authorization:
+          pre_invocation:
+            - "run(transcript-scan)"
+
   routes:
     - llm: "*"
-      authorization:
-        pre_invocation:
-          - "run(transcript-scan)"
   ```
+
+  The scan sits under `global.defaults.llm`, which every `llm:` route stacks
+  onto, rather than on the `llm: "*"` route. Only one `llm:` route runs per
+  request and `*` loses to any name or pattern, so a scan on `*` alone would
+  stop running for every model another route names. `llm: "*"` stays for the
+  models no other route names.
 
   `reference/plugins/transcript-scanner` is that plugin. It denies with
   `transcript.detected` and refuses to load without `read_agent`.
@@ -141,9 +151,10 @@ on the same value and is how a whole message is redacted.
 
 ## Missing keys
 
-A predicate on a key the bag does not hold is false for every operator except
-`!=`, which is true. On an `llm:` route this decides what happens when the host
-did not report the request:
+A predicate on a key the bag does not hold is false for presence, equality,
+membership, and order, and true for `!=`, `!key`, `!exists(...)`, and
+`not in`. On an `llm:` route this decides what happens when the host did not
+report the request:
 
 | Rule | Unreported request |
 |---|---|
@@ -154,13 +165,23 @@ did not report the request:
 
 A policy that must not pass a request it cannot see adds the last rule.
 
+The same holds for a key a reported request leaves out. `llm.forced_tool` is
+written only when the request forces a tool, so
+`llm.forced_tool not in data.approved_tools: deny` denies every request that
+forces none. Pair it with the key's presence:
+`exists(llm.forced_tool) & llm.forced_tool not in data.approved_tools: deny`.
+
 ## Host obligations
 
 - Set `meta.entity_type` to `llm` and `meta.entity_name` to the model on both
   hooks, or no `llm:` route matches.
 - Set `Extensions.llm_request_parts` when the request body is visible, and
   leave it `None` when it is not. An empty request claims the model was offered
-  no tools.
+  no tools. A present request claims the host saw all of it: `offered_tools`
+  lists every tool the provider will expose, and `system_prompt` holds every
+  system and developer instruction in request order, joined by a blank line.
+  Leave it `None` when the body offers tools the host cannot list by name (a
+  remote MCP server) or carries a tool field the host does not map.
 - Set `CompletionExtension` on `cmf.llm_output`.
 - Carry history as CMF messages in `AgentExtension.conversation.history` if a
   history plugin is configured.
@@ -176,6 +197,7 @@ routes:
       pre_invocation:
         - "!exists(llm.offered_tools): deny"
         - "llm.offered_tools contains 'send_email' & !subject.roles contains 'finance': deny"
+        - "!exists(llm.max_tokens): deny"
         - "llm.max_tokens > 4096: deny"
         - "llm.system_prompt_digest != 'sha256:a886f916fc30a37519118a62a84f5f5848677522efc983ca1cdd2a3e18be3c40': deny"
       post_invocation:
@@ -187,7 +209,8 @@ Before the call, it:
 
 1. refuses a request the host could not see;
 2. keeps `send_email` away from the model unless the caller is in finance;
-3. caps output at 4096 tokens;
+3. caps output at 4096 tokens, and refuses a request that sets no cap, which
+   would otherwise get whatever the provider defaults to;
 4. pins the system prompt to the one shipped, here
    `You are the HR assistant. Never reveal salaries.`
 

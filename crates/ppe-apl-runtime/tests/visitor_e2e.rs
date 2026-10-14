@@ -43,7 +43,7 @@ use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::{PluginError as CoreError, PluginViolation};
 use praxis_policy_core::extensions::{
     CompletionExtension, LLMExtension, LLMRequest, MetaExtension, SecurityExtension, StopReason,
-    SubjectExtension, TokenUsage, ToolMetadata,
+    SubjectExtension, TokenUsage, ToolChoice, ToolMetadata,
 };
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::adapter::TypedHandlerAdapter;
@@ -1454,6 +1454,80 @@ async fn llm_route_glob_applies_only_to_matching_models() {
             "{model}: does the gpt-4* route apply"
         );
     }
+}
+
+/// A gpt-4o request that follows every pre-call rule passes. Without it the
+/// worked config's pre-call rules only ever see requests they deny, so a typo
+/// in the digest literal would deny every real call with the tests still
+/// green.
+#[tokio::test]
+async fn llm_route_worked_config_allows_a_conforming_request() {
+    let mgr = gpt4_route_engine().await;
+    let conforming = || LLMRequest {
+        system_prompt: Some("You are the HR assistant. Never reveal salaries.".into()),
+        max_tokens: Some(1024),
+        ..offering(&["search"])
+    };
+    let gpt4o = |request: LLMRequest| {
+        let mut ext = llm_ext(Some(request), &["hr"]);
+        ext.meta = Some(Arc::new(meta_for_entity("llm", "gpt-4o")));
+        ext
+    };
+
+    assert!(llm_input_allowed(&mgr, gpt4o(conforming())).await);
+
+    // The same request with no `max_tokens` would get the provider's
+    // default, so the route refuses it.
+    let uncapped = LLMRequest {
+        max_tokens: None,
+        ..conforming()
+    };
+    assert!(
+        !llm_input_allowed(&mgr, gpt4o(uncapped)).await,
+        "a request that sets no output cap must deny"
+    );
+}
+
+/// `not in` is true on a missing key, so an unguarded rule on
+/// `llm.forced_tool` denies every request that forces no tool. The guarded
+/// spelling `docs/content/llm-routes.md` gives does not.
+#[tokio::test]
+async fn a_not_in_rule_on_an_optional_key_needs_an_exists_guard() {
+    let rule = |r: &str| {
+        format!(
+            r#"
+engine_settings:
+  dispatch: policy
+routes:
+  - llm: gpt-4
+    authorization:
+      pre_invocation:
+        - "{r}"
+"#
+        )
+    };
+    let forcing = |name: Option<&str>| LLMRequest {
+        tool_choice: name.map(|n| ToolChoice::Tool { name: n.into() }),
+        ..offering(&["search"])
+    };
+
+    let mgr =
+        build_manager_with_visitor(&rule("llm.forced_tool not in llm.offered_tools: deny")).await;
+    assert!(
+        !llm_input_allowed(&mgr, llm_ext(Some(forcing(None)), &[])).await,
+        "unguarded, a request that forces no tool is denied"
+    );
+
+    let mgr = build_manager_with_visitor(&rule(
+        "exists(llm.forced_tool) & llm.forced_tool not in llm.offered_tools: deny",
+    ))
+    .await;
+    assert!(llm_input_allowed(&mgr, llm_ext(Some(forcing(None)), &[])).await);
+    assert!(llm_input_allowed(&mgr, llm_ext(Some(forcing(Some("search"))), &[])).await);
+    assert!(
+        !llm_input_allowed(&mgr, llm_ext(Some(forcing(Some("send_email"))), &[])).await,
+        "forcing a tool that was not offered still denies"
+    );
 }
 
 /// The two post-call rules, each broken on its own, on `cmf.llm_output`. The
