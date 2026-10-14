@@ -4,7 +4,7 @@
 // Secret material the engine resolves ahead of serving and re-reads on demand.
 //
 // A provider addresses one backend: an environment variable, a file, or a
-// vault. Env and file ship here; Vault KV v2 is `praxis-policy-secrets-vault`.
+// vault. Env and file ship here; Vault KV v2 ships in `praxis-policy-builtins`.
 // A declared value binds a name to one provider and one reference.
 // Everything downstream names the value and never the provider or a raw
 // reference, which is what keeps the set of reachable secrets finite and
@@ -38,4 +38,7 @@ pub mod backends;
 pub use config::{SecretProviderConfig, SecretValueConfig, SecretsConfig};
 pub use error::SecretError;
 pub use provider::{SecretProvider, SecretProviderFactory, SecretProviderRegistry};
-pub use store::{RefreshReport, SecretRef, SecretStore};
+pub use store::{
+    ProviderFailure, ProviderHealth, RefreshReport, SecretRef, SecretSnapshot, SecretStore,
+    SecretsHealth,
+};

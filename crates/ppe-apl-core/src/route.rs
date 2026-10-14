@@ -26,11 +26,115 @@ use std::sync::Arc;
 
 use crate::attributes::AttributeBag;
 use crate::evaluator::{Decision, FieldOutcome, evaluate_effects, evaluate_pipeline};
-use crate::pipeline::TaintEvent;
+use crate::pipeline::{Stage, TaintEvent};
 use crate::rules::CompiledRoute;
 use crate::step::{
     DelegationInvoker, DispatchPhase, ElicitationInvoker, PdpResolver, PluginInvoker,
 };
+
+/// Deepest structured input a PDP step accepts, the default recursion limit
+/// `serde_json` applies when parsing. See [`StructuredInput::too_deep`].
+pub const MAX_STRUCTURED_DEPTH: usize = 128;
+
+/// Violation code for a PDP step refused because its structured input
+/// nests deeper than [`MAX_STRUCTURED_DEPTH`].
+pub const INPUT_TOO_DEEP_CODE: &str = "pdp.input_too_deep";
+
+/// Violation code for a PDP step that requires an absent request document.
+pub const LLM_REQUEST_MISSING_CODE: &str = "pdp.llm_request_missing";
+
+/// Structured JSON handed to PDPs beside the flat bag.
+///
+/// Entries are shared, so cloning only bumps reference counts. An absent
+/// entry stays `None` and is never defaulted to an empty object. `Debug`
+/// prints presence only, so logging a payload never dumps request JSON.
+///
+/// Depth is measured once, in [`StructuredInput::new`]. The fields are
+/// private so the recorded result cannot go stale.
+#[derive(Clone, Default)]
+pub struct StructuredInput {
+    llm_request: Option<Arc<serde_json::Value>>,
+    args: Option<Arc<serde_json::Value>>,
+    too_deep: bool,
+}
+
+impl StructuredInput {
+    /// Build the input and record whether either entry nests deeper than
+    /// [`MAX_STRUCTURED_DEPTH`].
+    pub fn new(
+        llm_request: Option<Arc<serde_json::Value>>,
+        args: Option<Arc<serde_json::Value>>,
+    ) -> Self {
+        let too_deep = [&llm_request, &args]
+            .into_iter()
+            .flatten()
+            .any(|value| exceeds_depth(value, MAX_STRUCTURED_DEPTH));
+        Self {
+            llm_request,
+            args,
+            too_deep,
+        }
+    }
+
+    /// The host-parsed LLM request body, when the route handler can read it.
+    pub fn llm_request(&self) -> Option<&Arc<serde_json::Value>> {
+        self.llm_request.as_ref()
+    }
+
+    /// Tool-call arguments as they were before any `args:` pipeline ran.
+    pub fn args(&self) -> Option<&Arc<serde_json::Value>> {
+        self.args.as_ref()
+    }
+
+    /// A copy holding only the chosen entries. The depth result carries over
+    /// unchanged, so dropping an entry never clears a refusal.
+    #[must_use]
+    pub fn retain(&self, keep_llm_request: bool, keep_args: bool) -> Self {
+        Self {
+            llm_request: self.llm_request.clone().filter(|_| keep_llm_request),
+            args: self.args.clone().filter(|_| keep_args),
+            too_deep: self.too_deep,
+        }
+    }
+
+    /// Whether either entry is deeper than [`MAX_STRUCTURED_DEPTH`].
+    ///
+    /// Depth is one more than the number of arrays and objects on the
+    /// deepest path: a scalar is depth 1, and `[]`, `{}`, `[1]` and
+    /// `{"a": 1}` are all depth 2. A PDP step on such input denies with
+    /// [`INPUT_TOO_DEEP_CODE`] and its engine never runs.
+    pub fn too_deep(&self) -> bool {
+        self.too_deep
+    }
+}
+
+/// Whether `value` is deeper than `limit`, per [`StructuredInput::too_deep`].
+/// Walks with an explicit stack and stops at the first level past `limit`.
+fn exceeds_depth(value: &serde_json::Value, limit: usize) -> bool {
+    use serde_json::Value;
+    // Each entry is a value and the depth of its children.
+    let mut stack = vec![(value, 2_usize)];
+    while let Some((node, child_depth)) = stack.pop() {
+        let next = child_depth + 1;
+        match node {
+            Value::Array(_) | Value::Object(_) if child_depth > limit => return true,
+            Value::Array(items) => stack.extend(items.iter().map(|child| (child, next))),
+            Value::Object(map) => stack.extend(map.values().map(|child| (child, next))),
+            _ => {},
+        }
+    }
+    false
+}
+
+impl std::fmt::Debug for StructuredInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StructuredInput")
+            .field("llm_request", &self.llm_request.as_ref().map(|_| "<set>"))
+            .field("args", &self.args.as_ref().map(|_| "<set>"))
+            .field("too_deep", &self.too_deep)
+            .finish()
+    }
+}
 
 /// Mutable payload for a route invocation. `args` is the request arguments
 /// object; `result` is the response object (`None` on the inbound path,
@@ -41,12 +145,19 @@ pub struct RoutePayload {
     pub args: serde_json::Value,
     /// The response, once the call has been made.
     pub result: Option<serde_json::Value>,
+    /// Structured JSON passed to PDPs through
+    /// [`PdpResolver::evaluate_structured`]. Pipelines never rewrite it.
+    pub structured: StructuredInput,
 }
 
 impl RoutePayload {
     /// A pre-call payload carrying only arguments.
     pub fn new(args: serde_json::Value) -> Self {
-        Self { args, result: None }
+        Self {
+            args,
+            result: None,
+            structured: StructuredInput::default(),
+        }
     }
 
     /// A post-call payload carrying both arguments and response.
@@ -54,7 +165,15 @@ impl RoutePayload {
         Self {
             args,
             result: Some(result),
+            structured: StructuredInput::default(),
         }
+    }
+
+    /// Attach the structured input PDPs receive.
+    #[must_use]
+    pub fn with_structured(mut self, structured: StructuredInput) -> Self {
+        self.structured = structured;
+        self
     }
 }
 
@@ -112,7 +231,8 @@ pub async fn evaluate_pre(
 
     for rule in &route.args {
         // Expand intermediate arrays; excessive fan-out fails closed.
-        let Some(paths) = expand_field_paths(&payload.args, &rule.field) else {
+        let Some(paths) = expand_for_pipeline(&payload.args, &rule.field, &rule.pipeline.stages)
+        else {
             return RouteDecision {
                 decision: Decision::Deny {
                     reason: Some(format!(
@@ -129,7 +249,7 @@ pub async fn evaluate_pre(
             };
         };
         for path in paths {
-            let Some(current) = get_dotted(&payload.args, &path).cloned() else {
+            let Some(current) = get_concrete(&payload.args, &path).cloned() else {
                 continue; // missing field on this element → no pipeline to run
             };
             let eval = evaluate_pipeline(
@@ -145,12 +265,12 @@ pub async fn evaluate_pre(
             match eval.outcome {
                 FieldOutcome::Pass => {},
                 FieldOutcome::Replace(new_val) => {
-                    if set_dotted(&mut payload.args, &path, new_val) {
+                    if set_concrete(&mut payload.args, &path, new_val) {
                         args_modified = true;
                     }
                 },
                 FieldOutcome::Omit => {
-                    if remove_dotted(&mut payload.args, &path) {
+                    if remove_concrete(&mut payload.args, &path) {
                         args_modified = true;
                     }
                 },
@@ -220,7 +340,8 @@ pub async fn evaluate_post(
     if let Some(result) = payload.result.as_mut() {
         for rule in &route.result {
             // Expand intermediate arrays; excessive fan-out fails closed.
-            let Some(paths) = expand_field_paths(result, &rule.field) else {
+            let Some(paths) = expand_for_pipeline(result, &rule.field, &rule.pipeline.stages)
+            else {
                 return RouteDecision {
                     decision: Decision::Deny {
                         reason: Some(format!(
@@ -237,7 +358,7 @@ pub async fn evaluate_post(
                 };
             };
             for path in paths {
-                let Some(current) = get_dotted(result, &path).cloned() else {
+                let Some(current) = get_concrete(result, &path).cloned() else {
                     continue;
                 };
                 let eval = evaluate_pipeline(
@@ -253,12 +374,12 @@ pub async fn evaluate_post(
                 match eval.outcome {
                     FieldOutcome::Pass => {},
                     FieldOutcome::Replace(new_val) => {
-                        if set_dotted(result, &path, new_val) {
+                        if set_concrete(result, &path, new_val) {
                             result_modified = true;
                         }
                     },
                     FieldOutcome::Omit => {
-                        if remove_dotted(result, &path) {
+                        if remove_concrete(result, &path) {
                             result_modified = true;
                         }
                     },
@@ -357,6 +478,9 @@ const MAX_FANOUT_DEPTH: usize = 128;
 /// before failing closed.
 const MAX_EXPANDED_PATHS: usize = 100_000;
 
+/// Bound recursive redaction even when no path matches and nothing is emitted.
+const MAX_REDACTION_WALK_STATES: usize = 100_000;
+
 /// Resolve one path segment against a value. Object segments index by key; a
 /// numeric segment indexes into an array, so a path produced by
 /// [`expand_field_paths`] resolves.
@@ -424,19 +548,138 @@ pub(crate) fn expand_field_paths(root: &serde_json::Value, path: &str) -> Option
     walk(root, &segs, "", 0, &mut out).then_some(out)
 }
 
+/// Redaction matches JSON keys without case sensitivity. `**` is an optional
+/// recursive segment that visits descendants at any depth.
+pub(crate) fn expand_for_pipeline(
+    root: &serde_json::Value,
+    path: &str,
+    stages: &[Stage],
+) -> Option<Vec<Vec<String>>> {
+    if !stages
+        .iter()
+        .any(|stage| matches!(stage, Stage::Redact { .. }))
+    {
+        return expand_field_paths(root, path).map(|paths| {
+            paths
+                .into_iter()
+                .map(|path| path.split('.').map(str::to_owned).collect())
+                .collect()
+        });
+    }
+    fn descend(
+        value: &serde_json::Value,
+        segs: &[&str],
+        segment: &str,
+        prefix: &mut Vec<String>,
+        depth: usize,
+        budget: &mut usize,
+        out: &mut Vec<Vec<String>>,
+    ) -> bool {
+        prefix.push(segment.to_owned());
+        let ok = walk(value, segs, prefix, depth + 1, budget, out);
+        prefix.pop();
+        ok
+    }
+    fn walk(
+        value: &serde_json::Value,
+        segs: &[&str],
+        prefix: &mut Vec<String>,
+        depth: usize,
+        budget: &mut usize,
+        out: &mut Vec<Vec<String>>,
+    ) -> bool {
+        if depth > MAX_FANOUT_DEPTH || *budget == 0 || out.len() > MAX_EXPANDED_PATHS {
+            return false;
+        }
+        *budget -= 1;
+        let Some((seg, rest)) = segs.split_first() else {
+            if out.len() == MAX_EXPANDED_PATHS {
+                return false;
+            }
+            out.push(prefix.clone());
+            return true;
+        };
+        if *seg == "**" {
+            if !walk(value, rest, prefix, depth + 1, budget, out) {
+                return false;
+            }
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        if !descend(child, segs, key, prefix, depth, budget, out) {
+                            return false;
+                        }
+                    }
+                },
+                serde_json::Value::Array(items) => {
+                    for (index, child) in items.iter().enumerate() {
+                        if !descend(child, segs, &index.to_string(), prefix, depth, budget, out) {
+                            return false;
+                        }
+                    }
+                },
+                _ => {},
+            }
+            return true;
+        }
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    if key.to_lowercase() == seg.to_lowercase()
+                        && !descend(child, rest, key, prefix, depth, budget, out)
+                    {
+                        return false;
+                    }
+                }
+            },
+            serde_json::Value::Array(items) => {
+                if let Ok(index) = seg.parse::<usize>() {
+                    if let Some(child) = items.get(index)
+                        && !descend(child, rest, seg, prefix, depth, budget, out)
+                    {
+                        return false;
+                    }
+                } else {
+                    for (index, child) in items.iter().enumerate() {
+                        if !descend(child, segs, &index.to_string(), prefix, depth, budget, out) {
+                            return false;
+                        }
+                    }
+                }
+            },
+            _ => {},
+        }
+        true
+    }
+    let segs: Vec<&str> = path.split('.').collect();
+    let mut paths = Vec::new();
+    let mut budget = if segs.contains(&"**") {
+        MAX_REDACTION_WALK_STATES
+    } else {
+        usize::MAX
+    };
+    if !walk(root, &segs, &mut Vec::new(), 0, &mut budget, &mut paths) {
+        return None;
+    }
+    paths.sort();
+    paths.dedup();
+    Some(paths)
+}
+
 /// Descend to the parent value of a dotted path, following object keys and
 /// numeric array indices. Returns `None` if any parent segment is missing or
 /// crosses a scalar. Shared by `set_dotted` / `remove_dotted` so both write
 /// through arrays the same way `get_dotted` reads through them.
-fn parent_mut<'a>(
+fn parent_mut<'a, S: AsRef<str>>(
     root: &'a mut serde_json::Value,
-    parents: &[&str],
+    parents: &[S],
 ) -> Option<&'a mut serde_json::Value> {
     let mut cur = root;
     for seg in parents {
         cur = match cur {
-            serde_json::Value::Object(map) => map.get_mut(*seg)?,
+            serde_json::Value::Object(map) => map.get_mut(seg.as_ref())?,
             serde_json::Value::Array(items) => seg
+                .as_ref()
                 .parse::<usize>()
                 .ok()
                 .and_then(move |i| items.get_mut(i))?,
@@ -463,9 +706,72 @@ pub fn get_dotted<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a ser
     Some(cur)
 }
 
+/// Read a concrete path without splitting object keys that contain dots.
+pub(crate) fn get_concrete<'a>(
+    root: &'a serde_json::Value,
+    path: &[String],
+) -> Option<&'a serde_json::Value> {
+    path.iter()
+        .try_fold(root, |value, segment| segment_get(value, segment))
+}
+
+/// Write a concrete path whose object keys retain their original boundaries.
+pub(crate) fn set_concrete(
+    root: &mut serde_json::Value,
+    path: &[String],
+    value: serde_json::Value,
+) -> bool {
+    let Some((leaf, parents)) = path.split_last() else {
+        *root = value;
+        return true;
+    };
+    let Some(cur) = parent_mut(root, parents) else {
+        return false;
+    };
+    match cur {
+        serde_json::Value::Object(map) => {
+            map.insert(leaf.clone(), value);
+            true
+        },
+        serde_json::Value::Array(items) => match leaf.parse::<usize>().ok() {
+            Some(i) => match items.get_mut(i) {
+                Some(slot) => {
+                    *slot = value;
+                    true
+                },
+                None => false,
+            },
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// Remove a concrete path whose object keys retain their original boundaries.
+pub(crate) fn remove_concrete(root: &mut serde_json::Value, path: &[String]) -> bool {
+    let Some((leaf, parents)) = path.split_last() else {
+        return false;
+    };
+    let Some(cur) = parent_mut(root, parents) else {
+        return false;
+    };
+    match cur {
+        serde_json::Value::Object(map) => map.remove(leaf).is_some(),
+        serde_json::Value::Array(items) => match leaf.parse::<usize>().ok() {
+            Some(i) if i < items.len() => {
+                items.remove(i);
+                true
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// Write to `root.a.b.c` via dot-separated path. Returns true on success;
 /// false if the parent path doesn't exist or the leaf's parent is a scalar.
 /// Does not create missing parents. A numeric leaf overwrites an array element.
+#[cfg(test)]
 pub(crate) fn set_dotted(
     root: &mut serde_json::Value,
     path: &str,
@@ -500,6 +806,7 @@ pub(crate) fn set_dotted(
 
 /// Remove `root.a.b.c` from a JSON value. Returns true if removal happened. A
 /// numeric leaf segment removes that array element.
+#[cfg(test)]
 pub(crate) fn remove_dotted(root: &mut serde_json::Value, path: &str) -> bool {
     let parts: Vec<&str> = path.split('.').collect();
     let (leaf, parents) = match parts.split_last() {
@@ -535,7 +842,7 @@ pub(crate) fn remove_dotted(root: &mut serde_json::Value, path: &str) -> bool {
 )]
 mod tests {
     use super::*;
-    use crate::pipeline::{FieldRule, Pipeline, Stage, TaintScope, TypeCheck};
+    use crate::pipeline::{FieldRule, Pipeline, TaintScope, TypeCheck};
     use crate::rules::{Effect, Expression, Rule};
     use crate::step::{
         NoopDelegationInvoker, NoopElicitationInvoker, PdpCall, PdpDecision, PdpDialect, PdpError,
@@ -543,6 +850,82 @@ mod tests {
     };
     use async_trait::async_trait;
     use serde_json::json;
+
+    #[test]
+    fn structured_input_clone_shares_and_debug_hides_values() {
+        let doc = Arc::new(json!({"input": "secret prompt"}));
+        let payload = RoutePayload::new(json!({}))
+            .with_structured(StructuredInput::new(Some(Arc::clone(&doc)), None));
+        let cloned = payload.clone();
+        assert!(Arc::ptr_eq(
+            cloned.structured.llm_request.as_ref().unwrap(),
+            &doc
+        ));
+        assert!(cloned.structured.args.is_none());
+        let rendered = format!("{:?}", payload.structured);
+        assert!(!rendered.contains("secret"), "{rendered}");
+        assert!(rendered.contains("<set>"), "{rendered}");
+    }
+
+    /// `depth` levels of `wrap` around a scalar, built without recursion.
+    fn nested(depth: usize, wrap: fn(serde_json::Value) -> serde_json::Value) -> serde_json::Value {
+        (1..depth).fold(json!(1), |inner, _| wrap(inner))
+    }
+
+    fn in_array(inner: serde_json::Value) -> serde_json::Value {
+        json!([inner])
+    }
+
+    fn in_object(inner: serde_json::Value) -> serde_json::Value {
+        json!({"k": inner})
+    }
+
+    #[test]
+    fn depth_counts_arrays_and_objects_alike() {
+        assert!(!exceeds_depth(&json!(1), 1));
+        for empty in [json!([]), json!({})] {
+            assert!(exceeds_depth(&empty, 1));
+            assert!(!exceeds_depth(&empty, 2));
+        }
+        for wrap in [in_array, in_object] {
+            assert!(!exceeds_depth(&nested(3, wrap), 3));
+            assert!(exceeds_depth(&nested(4, wrap), 3));
+        }
+        let mixed = json!({"a": [1, {"b": [2]}], "c": 3});
+        assert!(!exceeds_depth(&mixed, 5));
+        assert!(exceeds_depth(&mixed, 4));
+    }
+
+    #[test]
+    fn too_deep_is_recorded_for_either_entry() {
+        let limit = nested(MAX_STRUCTURED_DEPTH, in_array);
+        let over = Arc::new(nested(MAX_STRUCTURED_DEPTH + 1, in_object));
+        assert!(!StructuredInput::new(Some(Arc::new(limit)), None).too_deep());
+        assert!(StructuredInput::new(Some(Arc::clone(&over)), None).too_deep());
+        assert!(StructuredInput::new(None, Some(Arc::clone(&over))).too_deep());
+        assert!(!StructuredInput::default().too_deep());
+    }
+
+    #[test]
+    fn depth_limit_matches_serde_json_parsing() {
+        let text = |levels: usize| format!("{}{}", "[".repeat(levels), "]".repeat(levels));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text(MAX_STRUCTURED_DEPTH - 1)).unwrap();
+        assert!(!StructuredInput::new(None, Some(Arc::new(parsed))).too_deep());
+        serde_json::from_str::<serde_json::Value>(&text(MAX_STRUCTURED_DEPTH)).unwrap_err();
+        let built = (1..MAX_STRUCTURED_DEPTH).fold(json!([]), |inner, _| json!([inner]));
+        assert!(StructuredInput::new(None, Some(Arc::new(built))).too_deep());
+    }
+
+    #[test]
+    fn retain_drops_entries_and_keeps_the_depth_result() {
+        let over = Arc::new(nested(MAX_STRUCTURED_DEPTH + 1, in_array));
+        let input = StructuredInput::new(Some(Arc::new(json!({}))), Some(over));
+        let kept = input.retain(true, false);
+        assert!(kept.llm_request().is_some());
+        assert!(kept.args().is_none());
+        assert!(kept.too_deep());
+    }
 
     struct AllowPdp;
     #[async_trait]
@@ -912,6 +1295,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bare_recursive_path_redacts_a_scalar_result() {
+        let mut route = CompiledRoute::new("ping");
+        route
+            .result
+            .push(field_rule("**", vec![Stage::Redact { condition: None }]));
+        let mut bag = AttributeBag::new();
+        let mut payload = RoutePayload::with_result(json!({}), json!("secret"));
+        let outcome = evaluate_route(
+            &route,
+            &mut bag,
+            &mut payload,
+            &pdp_arc(),
+            &plugins(),
+            &delegations(),
+            &elicitations(),
+        )
+        .await;
+        assert_eq!(outcome.decision, Decision::Allow);
+        assert!(outcome.result_modified);
+        assert_eq!(payload.result, Some(json!("[REDACTED]")));
+    }
+
+    #[tokio::test]
     async fn taints_accumulate_across_phases() {
         let mut route = CompiledRoute::new("ping");
         // args emits a taint
@@ -1025,6 +1431,70 @@ mod tests {
         assert_eq!(
             expand_field_paths(&v, "rows.0.ssn"),
             Some(vec!["rows.0.ssn".to_owned()])
+        );
+    }
+
+    #[test]
+    fn redaction_paths_match_case_and_recurse() {
+        let root = json!({
+            "SSN": "a",
+            "employee": { "ssn": "b" },
+            "rows": [{ "Ssn": "c" }],
+        });
+        let stages = [Stage::Redact { condition: None }];
+        assert_eq!(
+            expand_for_pipeline(&root, "**.ssn", &stages),
+            Some(vec![
+                vec!["SSN".to_owned()],
+                vec!["employee".to_owned(), "ssn".to_owned()],
+                vec!["rows".to_owned(), "0".to_owned(), "Ssn".to_owned()],
+            ])
+        );
+        assert_eq!(
+            expand_for_pipeline(&root, "ssn", &stages),
+            Some(vec![vec!["SSN".to_owned()]])
+        );
+    }
+
+    #[test]
+    fn recursive_redaction_keeps_dotted_object_keys_intact() {
+        let mut root = json!({ "employee.v2": { "ssn": "secret" } });
+        let stages = [Stage::Redact { condition: None }];
+        let paths = expand_for_pipeline(&root, "**.ssn", &stages).expect("within bounds");
+        assert_eq!(
+            paths,
+            vec![vec!["employee.v2".to_owned(), "ssn".to_owned()]]
+        );
+        assert_eq!(get_concrete(&root, &paths[0]), Some(&json!("secret")));
+        assert!(set_concrete(&mut root, &paths[0], json!("[REDACTED]")));
+        assert_eq!(root["employee.v2"]["ssn"], "[REDACTED]");
+    }
+
+    #[test]
+    fn repeated_recursive_segments_fail_closed_without_a_match() {
+        let mut root = json!({ "leaf": 1 });
+        for _ in 0..20 {
+            root = json!({ "next": root });
+        }
+        let stages = [Stage::Redact { condition: None }];
+        assert!(
+            expand_for_pipeline(&root, "**.**.**.**.**.**.**.**.missing", &stages).is_none(),
+            "no-match traversal must exhaust its bounded work budget"
+        );
+    }
+
+    #[test]
+    fn wide_non_recursive_redaction_keeps_the_emitted_path_limit() {
+        let stages = [Stage::Redact { condition: None }];
+        let matching = json!({ "rows": vec![json!({ "ssn": "secret" }); 50_001] });
+        let paths = expand_for_pipeline(&matching, "rows.ssn", &stages).expect("within path limit");
+        assert_eq!(paths.len(), 50_001);
+
+        let no_match = json!({ "rows": vec![json!({ "other": true }); 100_001] });
+        assert_eq!(
+            expand_for_pipeline(&no_match, "rows.ssn", &stages),
+            Some(Vec::new()),
+            "a wide no-match result should not spend a recursive-path budget"
         );
     }
 

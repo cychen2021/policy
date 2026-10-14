@@ -24,9 +24,11 @@
 //                        string that matches the YAML block's `kind:`
 //                        field.
 //
-// Both channels feed the same `PdpRouter` inside the visitor, so a
-// host can mix the two freely — code-supplied Cedar for tests plus a
-// config-declared OPA in prod, say.
+// Both channels feed the same `PdpRouter` inside the visitor. Code-supplied
+// resolvers are registered first and win for their dialect. Config-supplied
+// resolvers are rebuilt as a set on every load, so a reload can replace or
+// remove them without touching the code-supplied ones. A host can mix the
+// two — code-supplied Cedar plus a config-declared OPA, say.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -132,7 +134,7 @@ impl AplOptions {
 /// use std::sync::Arc;
 /// use praxis_policy_core::engine::PolicyEngine;
 /// use praxis_policy_apl_runtime::{register_apl, AplOptions};
-/// use praxis_policy_pdp_cedar_direct::CedarDirectPdpFactory;
+/// use praxis_policy_builtins::pdps::cedar_direct::CedarDirectPdpFactory;
 ///
 /// let mgr = Arc::new(PolicyEngine::default());
 /// mgr.register_factory("scope-gate", Box::new(ScopeGateFactory));

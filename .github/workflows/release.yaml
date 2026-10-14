@@ -44,15 +44,40 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-release-verify-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-release-verify-
-      # `make lint` runs rustfmt from nightly, which rust-toolchain.toml does
-      # not cover. See the note in ci.yml.
-      - run: rustup toolchain install nightly --component rustfmt --profile minimal
       - run: make lint
       - run: make test
       # Proves every publishable crate packages cleanly before anything is
       # uploaded. A failure here is recoverable; a half-published workspace is
       # not, because crates.io versions are immutable.
-      - run: cargo package --workspace --locked
+      # The unpublished test crates are excluded, as in ci.yml. Patch sibling
+      # dependencies to this checkout while Cargo verifies each package archive:
+      # the tag's new APIs are not on crates.io until publishing starts.
+      - run: >-
+          cargo package --workspace
+          --exclude praxis-policy-test-utils
+          --exclude praxis-policy-tests-integration
+          --exclude praxis-policy-tests-resilience
+          --exclude praxis-policy-tests-security
+          --locked
+          --config 'patch.crates-io.praxis-policy-core.path="crates/ppe-core"'
+          --config 'patch.crates-io.praxis-policy-orchestration.path="crates/ppe-orchestration"'
+          --config 'patch.crates-io.praxis-policy-apl-core.path="crates/ppe-apl-core"'
+          --config 'patch.crates-io.praxis-policy-apl-cmf.path="crates/ppe-apl-cmf"'
+          --config 'patch.crates-io.praxis-policy-apl-runtime.path="crates/ppe-apl-runtime"'
+          --config 'patch.crates-io.praxis-policy-builtins.path="crates/builtins"'
+          --config 'patch.crates-io.praxis-policy.path="crates/ppe"'
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-package-target
+      # Packaging alone does not compile bundled extensions, so check the
+      # whole release source with them enabled.
+      - run: cargo check --workspace --all-features --locked
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-package-target
+      # Scoped to the facade and run with all features: the facade is
+      # `default = []`, so a default-feature run inspects none of the
+      # re-exports this check exists to protect. A floor, not a proof —
+      # cross-crate re-export coverage in semver-checks is incomplete.
+      - run: make semver-facade
 
   tag-matches-manifest:
     name: tag matches manifest version

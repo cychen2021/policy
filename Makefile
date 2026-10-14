@@ -8,9 +8,7 @@ SHELL := /bin/bash
 
 CARGO ?= cargo
 
-# rustfmt runs on nightly to match the rest of the org and the tree's committed
-# formatting (see the `style: apply nightly rustfmt formatting` commit). Stable
-# rustfmt would reformat it. Override to pin a specific nightly.
+# Nightly is needed only for the optional ThreadSanitizer target below.
 NIGHTLY ?= nightly
 
 # `make release LEVEL=patch` or `make release VERSION=0.1.1`. VERSION wins.
@@ -28,19 +26,25 @@ help:
 	@echo "  build             Build the workspace (debug)"
 	@echo "  build-release     Build the workspace (release)"
 	@echo "  check             cargo check the workspace"
+	@echo "  check-features    cargo check praxis-policy-builtins per feature"
 	@echo "  clean             Remove the target/ directory"
 	@echo ""
 	@echo "Lint & format:"
-	@echo "  fmt               Format Rust code (nightly rustfmt)"
+	@echo "  fmt               Format Rust code (pinned stable rustfmt)"
 	@echo "  lint              CI lint gate: fmt --check + clippy -D warnings"
 	@echo "  lint-extra        Extra lint checks: typos + taplo fmt --check"
 	@echo "  clippy            Run clippy on the workspace (-D warnings)"
 	@echo "  lint-fix          Auto-fix: cargo fmt + clippy --fix"
 	@echo "  machete           Report unused dependencies (advisory)"
+	@echo "  semver-facade     Facade API compatibility vs the last release"
 	@echo ""
 	@echo "Test:"
 	@echo "  test              Run all workspace tests"
+	@echo "  test-integration  Integration, resilience and security suites"
+	@echo "  test-resilience   Resilience suite (dependency failure, concurrency)"
+	@echo "  test-security     Security suite (adversarial inputs)"
 	@echo "  test-tsan         Engine concurrency stress under ThreadSanitizer (nightly)"
+	@echo "  bench-pdp-cache   PDP decision-cache hit vs miss (on demand, not CI)"
 	@echo ""
 	@echo "Benchmarks (on demand — not part of make ci; see docs/dev/benchmarks.md):"
 	@echo "  bench             Criterion suite (ppe-benches / issue #19)"
@@ -107,25 +111,31 @@ clean:
 
 .PHONY: fmt
 fmt:
-	@$(CARGO) +$(NIGHTLY) fmt --all
+	@$(CARGO) fmt --all
 
 .PHONY: clippy
 clippy:
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
+	@$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 
 # CI-safe gate: read-only fmt check plus clippy. Lint levels come from
 # [workspace.lints] in Cargo.toml.
 .PHONY: lint
 lint:
 	@echo "fmt --check + clippy -D warnings ..."
-	@$(CARGO) +$(NIGHTLY) fmt --all -- --check
+	@$(CARGO) fmt --all -- --check
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
+# The all-features pass is not redundant. `praxis-policy-builtins` is
+# `default = []`, and a default-feature workspace run only reaches cedar, cel
+# and opa — the three `ppe-pdp-diff` turns on through feature unification. The
+# other six extensions are linted by this pass alone.
+	@$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 	@$(CARGO) clippy -p ppe-benches --all-targets --features dhat-heap -- -D warnings
 	@echo "lint passed"
 
 .PHONY: lint-fix
 lint-fix:
-	@$(CARGO) +$(NIGHTLY) fmt --all
+	@$(CARGO) fmt --all
 	@$(CARGO) clippy --workspace --all-targets --fix --allow-dirty --allow-staged -- -D warnings
 
 # Advisory, not part of the blocking gate: machete is wrong in both directions. It
@@ -168,6 +178,24 @@ test:
 	@$(CARGO) test --workspace
 	@$(CARGO) test --workspace --all-features
 
+# The suites under tests/. They build only with `--all-features`, which turns on
+# their `suite` feature; `make test` runs them in its second pass. As in praxis,
+# test-integration runs all three.
+.PHONY: test-integration
+test-integration:
+	@$(CARGO) test --all-features \
+		-p praxis-policy-tests-integration \
+		-p praxis-policy-tests-resilience \
+		-p praxis-policy-tests-security
+
+.PHONY: test-resilience
+test-resilience:
+	@$(CARGO) test --all-features -p praxis-policy-tests-resilience
+
+.PHONY: test-security
+test-security:
+	@$(CARGO) test --all-features -p praxis-policy-tests-security
+
 # ThreadSanitizer on the engine concurrency stress test. Needs nightly, a
 # Linux target, and an instrumented libstd (`-Zbuild-std`). The sanitizer
 # does not run on the pinned stable toolchain or on macOS. `--test-threads=1`
@@ -180,6 +208,12 @@ test-tsan:
 		-p praxis-policy-core --test engine_concurrency \
 		--target x86_64-unknown-linux-gnu -- --test-threads=1
 	@echo "test-tsan passed"
+
+# Hit vs miss for the PDP decision cache. On demand; not part of `make ci`.
+# Wall-clock numbers are recorded in docs/pdp-decision-cache.md.
+.PHONY: bench-pdp-cache
+bench-pdp-cache:
+	@$(CARGO) bench -p praxis-policy-builtins --bench pdp_decision_cache --features cel
 
 # =============================================================================
 # Benchmarks (issue #19) — on demand, never part of `make ci`
@@ -279,6 +313,16 @@ mutants:
 
 # Semver compatibility check against the last published version.
 .PHONY: semver
+# Facade-scoped API compatibility against the last release. --all-features is
+# required, not optional: the facade is `default = []`, so a default-feature run
+# sees no builtin re-export and passes without inspecting the surface this
+# guards. Scoped to the facade deliberately — a workspace-wide run is noisy from
+# the retired names and from a crate with no published baseline.
+.PHONY: semver-facade
+semver-facade:
+	@command -v cargo-semver-checks >/dev/null 2>&1 || $(CARGO) install cargo-semver-checks --locked
+	@cargo semver-checks --package praxis-policy --all-features
+
 semver:
 	@command -v cargo-semver-checks >/dev/null 2>&1 || $(CARGO) install cargo-semver-checks --locked
 	@cargo semver-checks
@@ -290,6 +334,10 @@ semver:
 .PHONY: doc
 doc:
 	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps
+# Second pass for the same reason as `lint`: a default-feature workspace run
+# documents only the cedar, cel and opa modules, so the other six are covered
+# here alone.
+	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --all-features
 
 # Link and style checks for the markdown under docs/. Advisory, like
 # lint-extra: neither is part of `make ci`, because both reach for a tool the
@@ -324,8 +372,26 @@ docs-lint:
 # CI
 # =============================================================================
 
+# Compile `praxis-policy-builtins` with no features, then with each one alone.
+# Neither the default nor the all-features pass can catch a feature body that
+# omits its own `dep:` edge or its module-group marker: under --all-features
+# another feature supplies the dependency, and under default features nothing
+# compiles at all. This is the only gate that builds a partial feature set.
+BUILTIN_FEATURES := jwt api-key oauth elicitation-ciba cedar cel opa valkey secrets-vault
+
+.PHONY: check-features
+check-features:
+	@echo "per-feature check: praxis-policy-builtins ..."
+	@$(CARGO) check -p praxis-policy-builtins --all-targets --no-default-features
+	@for f in $(BUILTIN_FEATURES); do \
+		echo "  --features $$f"; \
+		$(CARGO) check -p praxis-policy-builtins --all-targets \
+			--no-default-features --features "$$f" || exit 1; \
+	done
+	@echo "check-features passed"
+
 .PHONY: ci
-ci: lint test
+ci: lint check-features test
 
 # =============================================================================
 # Release
@@ -356,12 +422,19 @@ release-version: release-tool
 release: release-tool
 	@$(CARGO) release $(RELEASE_ARG) --workspace --no-publish --no-push --execute
 
-# Build and verify a .crate for every publishable member without uploading, the
-# same check the release workflow's dry run performs. CI runs this on a clean
-# checkout; --allow-dirty lets it run locally with work in progress.
+# Build a .crate for every publishable member without uploading, then check
+# the changed workspace together with all features. Cargo's per-package verify
+# resolves sibling crate versions from crates.io, where this change is not yet
+# published. The test crates are unpublished and have local-only dependencies.
+# CI runs this on a clean checkout; --allow-dirty permits local work in progress.
 .PHONY: publish-dry
+PACKAGE_TEST_EXCLUDES = --exclude praxis-policy-test-utils \
+	--exclude praxis-policy-tests-integration \
+	--exclude praxis-policy-tests-resilience \
+	--exclude praxis-policy-tests-security
 publish-dry:
-	@$(CARGO) package --workspace --locked --allow-dirty
+	@$(CARGO) package --workspace $(PACKAGE_TEST_EXCLUDES) --locked --allow-dirty --no-verify
+	@$(CARGO) check --workspace --all-features --locked
 
 # Tag the current commit and push it. The tag is what the release workflow
 # triggers on. VERSION must be semver with no leading `v`.

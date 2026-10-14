@@ -31,17 +31,18 @@ go next.
 
 ## Using it
 
-Add one dependency to get the engine and all bundled extensions:
+Add one dependency to get the engine and all stable bundled extensions:
 
 ```toml
-praxis-policy = { version = "0.3", features = ["builtins"] }
+praxis-policy = { version = "0.4", features = ["builtins"] }
 ```
 
 Without `builtins`, you get the engine alone and no extensions compiled in.
-Declare individual features instead: `jwt`, `oauth`, `elicitation-ciba`,
-`cedar`, `cel`, `opa`, `valkey`.
+Declare individual features instead: `jwt`, `api-key`, `oauth`,
+`elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`.
+The token quota plugin is available separately through `experimental-quota`.
 
-The crates are versioned together and released together, so a single `0.3`
+The crates are versioned together and released together, so a single `0.4`
 requirement covers the set. Requires Rust 1.92 or newer.
 
 ## Documentation
@@ -56,7 +57,7 @@ a breaking change gets a minor bump and is documented in the CHANGELOG.
 ## Layout
 
     crates/             the engine, APL implementation, and host facade
-    builtins/           bundled plugins, decision points, and session stores
+    crates/builtins/    the nine bundled extensions, one feature each
     reference/          worked examples, not published and not bundled
 
 A host may replace any bundled plugin. Implement a Plugin Factory through
@@ -65,10 +66,11 @@ A host may replace any bundled plugin. Implement a Plugin Factory through
 unrecognized `kind` causes policy loading to fail, so missing registrations are
 detected at startup.
 
-`reference/plugins/` holds two worked examples: a PII scanner and an audit
-logger. These are not published, but are linted and tested here, and the
-reference [demo](https://github.com/praxis-proxy/demos) registers them as host
-plugins.
+`reference/plugins/` holds three worked examples: a PII scanner, an audit
+logger, and an OCSF audit sink that emits each decision as a signed,
+hash-chained OCSF event. These are not published, but are linted and tested
+here, and the reference [demo](https://github.com/praxis-proxy/demos)
+registers the first two as host plugins.
 
 ## Building
 

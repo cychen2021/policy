@@ -25,6 +25,9 @@ the responsible human contributor signs off. Do not add AI tool trailers.
 make check          # type-check both feature sets (never links)
 make build          # workspace build (debug)
 make test           # all workspace tests (two passes)
+make test-integration  # integration + resilience + security suites
+make test-resilience   # resilience suite only
+make test-security     # security suite only
 make lint           # fmt --check + clippy -D warnings
 make lint-extra     # typos + taplo fmt --check
 make audit          # cargo deny check
@@ -43,7 +46,7 @@ cargo test -p praxis-policy-core --lib -- test_name
 
 ## Architecture
 
-17-crate workspace implementing a policy engine for
+Cargo workspace implementing a policy engine for
 AI agent traffic. The engine decides who may call
 which tool, what data comes back, and where that
 data goes next.
@@ -63,16 +66,24 @@ crates/
   ppe-pdp-diff  differential tests across cedar/cel/opa
   ppe-benches   criterion benches, not a default member
 
-builtins/
-  plugins/      identity-jwt, delegator-oauth,
-                elicitation-ciba
-  pdps/         cedar-direct, cel, opa
-  session/      valkey
-  secrets/      vault
+  builtins      the nine bundled extensions, one
+                Cargo feature each:
+                  plugins::  identity_jwt, identity_api_key,
+                             delegator_oauth, elicitation_ciba
+                  pdps::     cedar_direct, cel, opa
+                  session::  valkey
+                  secrets::  vault
 
 reference/
   plugins/      pii-scanner, audit-logger,
                 transcript-scanner (examples)
+
+tests/          suites, `--all-features` pass only
+  integration   demo scenarios via the reference host,
+                live mode (env-gated)
+  resilience    dependency failure, concurrency
+  security      adversarial inputs
+  utils         reference host, scripted IdP, fixtures
 ```
 
 **Dependency flow:**
@@ -101,8 +112,10 @@ These are settled decisions, not a backlog:
 - **`elided_lifetimes_in_paths`,
   `single_use_lifetimes` at `allow`**: style
   items that do not affect runtime behavior
-- **`mod.rs` module style**: three module directories
-  use `mod.rs`; not switching to file-adjacent style
+- **`mod.rs` module style**: several module
+  directories use `mod.rs`, including every group and
+  extension in `crates/builtins`; not switching to
+  file-adjacent style
 
 ### File headers
 
@@ -137,6 +150,13 @@ The Valkey session store tests are `#[ignore]`-gated
 and need `VALKEY_TEST_URL` set to run against a real
 server. `make coverage` runs them with
 `VALKEY_TESTS_OPTIONAL=1` so they skip gracefully.
+
+The suites under `tests/` skip their `#[ignore]`d
+`scenarios::live` tests unless `VALKEY_TEST_URL`,
+`PPE_KEYCLOAK_URL` or `VAULT_*` is set. A test for an
+open defect is `known_gap_*` with
+`#[should_panic(expected = "known gap #<issue>")]`.
+See `docs/content/testing.md`, Integration suites.
 
 Prefer one test binary per concern over many small
 ones. Cargo builds one binary per `tests/*.rs`, and a

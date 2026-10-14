@@ -97,7 +97,9 @@ pub use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 /// carries and installs it with `PolicyEngine::set_secret_providers` before
 /// `initialize()`. [`SecretProviderFactory`] is what a host implements to add a
 /// backend of its own, and [`SecretRef`] is the handle a consumer keeps so a
-/// later refresh reaches it.
+/// later refresh reaches it. A consumer that rebuilds something on rotation
+/// reads [`SecretRef::snapshot`], which pairs the value with the generation it
+/// belongs to.
 ///
 /// `env` and `file` are always registered by
 /// [`SecretProviderRegistry::with_builtin_backends`]. Vault KV v2 is behind
@@ -111,8 +113,8 @@ pub use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 /// `PolicyEngine::secrets_last_success`, neither of which yields secret
 /// material.
 pub use praxis_policy_core::secrets::{
-    RefreshReport, SecretError, SecretProvider, SecretProviderFactory, SecretProviderRegistry,
-    SecretRef,
+    ProviderFailure, ProviderHealth, RefreshReport, SecretError, SecretProvider,
+    SecretProviderFactory, SecretProviderRegistry, SecretRef, SecretSnapshot, SecretsHealth,
 };
 
 /// Curated re-exports for plugin authors, so a plugin crate can depend on this
@@ -121,26 +123,38 @@ pub use praxis_policy_core::prelude;
 
 // Concrete factory types + KIND consts, each behind its feature.
 #[cfg(feature = "cedar")]
-pub use praxis_policy_pdp_cedar_direct::CedarDirectPdpFactory;
+pub use praxis_policy_builtins::pdps::cedar_direct::CedarDirectPdpFactory;
 #[cfg(feature = "cel")]
-pub use praxis_policy_pdp_cel::CelPdpFactory;
+pub use praxis_policy_builtins::pdps::cel::CelPdpFactory;
 #[cfg(feature = "opa")]
-pub use praxis_policy_pdp_opa::OpaPdpFactory;
+pub use praxis_policy_builtins::pdps::opa::OpaPdpFactory;
 #[cfg(feature = "oauth")]
-pub use praxis_policy_plugin_delegator_oauth::{KIND as OAUTH_KIND, OAuthDelegatorFactory};
+pub use praxis_policy_builtins::plugins::delegator_oauth::{
+    KIND as OAUTH_KIND, OAuthDelegatorFactory,
+};
+#[cfg(feature = "delegator-vault")]
+pub use praxis_policy_builtins::plugins::delegator_vault::{
+    KIND as VAULT_DELEGATOR_KIND, VaultDelegatorFactory,
+};
 #[cfg(feature = "elicitation-ciba")]
-pub use praxis_policy_plugin_elicitation_ciba::{CibaApproverFactory, KIND as CIBA_KIND};
+pub use praxis_policy_builtins::plugins::elicitation_ciba::{
+    CibaApproverFactory, KIND as CIBA_KIND,
+};
 #[cfg(feature = "api-key")]
-pub use praxis_policy_plugin_identity_api_key::{ApiKeyIdentityFactory, KIND as API_KEY_KIND};
+pub use praxis_policy_builtins::plugins::identity_api_key::{
+    ApiKeyIdentityFactory, KIND as API_KEY_KIND,
+};
 #[cfg(feature = "jwt")]
-pub use praxis_policy_plugin_identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
+pub use praxis_policy_builtins::plugins::identity_jwt::{JwtIdentityFactory, KIND as JWT_KIND};
+#[cfg(feature = "experimental-quota")]
+pub use praxis_policy_builtins::plugins::quota::{KIND as QUOTA_KIND, QuotaFactory};
 #[cfg(feature = "secrets-vault")]
-pub use praxis_policy_secrets_vault::{
+pub use praxis_policy_builtins::secrets::vault::{
     KIND as VAULT_SECRET_KIND, VaultSecretProviderFactory,
     register as register_vault_secret_provider, registry_with_vault,
 };
 #[cfg(feature = "valkey")]
-pub use praxis_policy_session_valkey::{
+pub use praxis_policy_builtins::session::valkey::{
     KIND as VALKEY_KIND, ValkeyConfig, ValkeySessionStoreFactory,
 };
 
@@ -188,12 +202,32 @@ macro_rules! register_builtins {
     };
 }
 
+// Module aliases for the `register_builtins!` arms below. The macro matches a
+// single identifier and uses it for both `KIND` and the factory type, which a
+// multi-segment module path cannot satisfy; aliasing keeps the registration
+// keyed off each extension's own `KIND` const.
+#[cfg(feature = "oauth")]
+use praxis_policy_builtins::plugins::delegator_oauth as oauth_builtin;
+#[cfg(feature = "delegator-vault")]
+use praxis_policy_builtins::plugins::delegator_vault as vault_delegator_builtin;
+#[cfg(feature = "elicitation-ciba")]
+use praxis_policy_builtins::plugins::elicitation_ciba as ciba_builtin;
+#[cfg(feature = "api-key")]
+use praxis_policy_builtins::plugins::identity_api_key as api_key_builtin;
+#[cfg(feature = "jwt")]
+use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
+#[cfg(feature = "experimental-quota")]
+use praxis_policy_builtins::plugins::quota as quota_builtin;
+
 #[cfg(feature = "_builtin")]
 register_builtins! {
-    feature "jwt"              => praxis_policy_plugin_identity_jwt::JwtIdentityFactory,
-    feature "api-key"          => praxis_policy_plugin_identity_api_key::ApiKeyIdentityFactory,
-    feature "oauth"            => praxis_policy_plugin_delegator_oauth::OAuthDelegatorFactory,
-    feature "elicitation-ciba" => praxis_policy_plugin_elicitation_ciba::CibaApproverFactory,
+    feature "jwt"                => jwt_builtin::JwtIdentityFactory,
+    feature "api-key"            => api_key_builtin::ApiKeyIdentityFactory,
+    feature "oauth"              => oauth_builtin::OAuthDelegatorFactory,
+    feature "delegator-vault"    => vault_delegator_builtin::VaultDelegatorFactory,
+    feature "elicitation-ciba"   => ciba_builtin::CibaApproverFactory,
+    // Experimental: registers only when `experimental-quota` is named, never via `builtins`.
+    feature "experimental-quota" => quota_builtin::QuotaFactory,
 }
 
 /// The enabled PDP factories, ready to drop into
@@ -251,6 +285,13 @@ pub fn install_builtins(mgr: &std::sync::Arc<PolicyEngine>) {
     let _visitor = register_apl(mgr, opts);
 }
 
+/// Warn that experimental extensions are compiled in. Gated on `experimental`,
+/// which every `experimental-*` feature sets; call at host startup.
+#[cfg(feature = "experimental")]
+pub fn warn_experimental_features() {
+    tracing::warn!("experimental features are enabled that should not be used in production");
+}
+
 /// A default `HttpTransport` on hyper, for hosts that inject none.
 ///
 /// Available with the `http-hyper` feature.
@@ -293,6 +334,21 @@ pub fn install_default_http_transport(mgr: &std::sync::Arc<PolicyEngine>) -> boo
     mgr.set_http_transport(std::sync::Arc::new(http_hyper::HyperTransport::new()))
 }
 
+/// Register the enabled builtins and use hyper when the host has not already
+/// installed an HTTP transport.
+///
+/// Call [`PolicyEngine::set_http_transport`] first when the host has its own
+/// transport. This helper keeps that transport and returns `false`; otherwise
+/// it installs the bundled hyper transport and returns `true`. The bundled
+/// transport refuses private destinations by default, so an in-cluster
+/// Limitador needs a host transport configured to permit that destination.
+#[cfg(all(feature = "_builtin", feature = "http-hyper"))]
+pub fn install_builtins_with_default_http_transport(mgr: &std::sync::Arc<PolicyEngine>) -> bool {
+    let installed = install_default_http_transport(mgr);
+    install_builtins(mgr);
+    installed
+}
+
 #[cfg(all(test, feature = "_builtin"))]
 mod tests {
     use super::*;
@@ -302,6 +358,19 @@ mod tests {
     fn install_builtins_runs_without_panic() {
         let mgr = Arc::new(PolicyEngine::default());
         install_builtins(&mgr);
+    }
+
+    #[cfg(feature = "http-hyper")]
+    #[test]
+    fn combined_bootstrap_installs_hyper_only_without_an_injected_transport() {
+        let standalone = Arc::new(PolicyEngine::default());
+        assert!(install_builtins_with_default_http_transport(&standalone));
+
+        let embedded = Arc::new(PolicyEngine::default());
+        assert!(embedded.set_http_transport(Arc::new(
+            HyperTransport::new().with_allow_private_destinations()
+        )));
+        assert!(!install_builtins_with_default_http_transport(&embedded));
     }
 
     #[test]
@@ -375,6 +444,7 @@ mod tests {
             (cfg!(feature = "jwt"), "identity/jwt"),
             (cfg!(feature = "api-key"), "identity/api-key"),
             (cfg!(feature = "oauth"), "delegator/oauth"),
+            (cfg!(feature = "delegator-vault"), "delegator/vault"),
             (cfg!(feature = "elicitation-ciba"), "elicitation/ciba"),
         ];
         for (enabled, kind) in expected {
@@ -408,5 +478,28 @@ mod tests {
                 "the error must name the unresolved kind: {err}"
             );
         }
+    }
+
+    /// quota is experimental: `builtins` alone must not register it.
+    #[cfg(not(feature = "experimental-quota"))]
+    #[test]
+    fn quota_is_not_registered_without_the_experimental_feature() {
+        let err = load_error_for_kind("quota/limitador");
+        assert!(
+            err.contains("no factory registered"),
+            "quota must not register without experimental-quota; got: {err}"
+        );
+    }
+
+    /// With `experimental-quota` named, `install_builtins` registers quota (it
+    /// then fails on config, not on a missing factory).
+    #[cfg(feature = "experimental-quota")]
+    #[test]
+    fn quota_registers_with_the_experimental_feature() {
+        let err = load_error_for_kind("quota/limitador");
+        assert!(
+            !err.contains("no factory registered"),
+            "experimental-quota is on, so quota must register; got: {err}"
+        );
     }
 }

@@ -42,6 +42,7 @@ warns when a plugin is reached on fewer hooks than it declares.
 |---|---|---|
 | `dispatch` | `policy` | which model above |
 | `plugin_timeout` | `30` | per-plugin timeout, in seconds |
+| `audit_timeout_milliseconds` | `100` | maximum time per audit sink callback, in milliseconds |
 | `short_circuit_on_deny` | `true` | stop a hook's remaining plugins once one denies |
 | `route_cache_max_entries` | `10000` | dispatch-plan cache size |
 
@@ -57,7 +58,7 @@ its scope's set is a load error naming the scope and the set.
 | `global.defaults.<entity>:` | `description`, `metadata`, `plugins`, `authentication`, `assertions`, `response`, `authorization`, `args`, `result` |
 | `groups.<name>:` | the same set as `global.defaults.<entity>:` |
 | `routes[]` | `tool`, `resource`, `prompt`, `llm`, `http`, `meta`, `groups`, `plugins`, `authentication`, `assertions`, `response`, `authorization`, `args`, `result` |
-| `engine_settings:` | `dispatch`, `plugin_timeout`, `short_circuit_on_deny`, `route_cache_max_entries` |
+| `engine_settings:` | `dispatch`, `plugin_timeout`, `audit_timeout_milliseconds`, `short_circuit_on_deny`, `route_cache_max_entries`, `effect_log_path`, `effect_log_compaction_threshold`, `capture_content_provenance`, `content_provenance_key`, `audit_stream_namespace` |
 | an `authentication:` block | `steps`, `replace_inherited` |
 | an `authentication:` step | `name`, `config` |
 | an `assertions:` block | `request`, `response` |
@@ -134,7 +135,11 @@ global:
     - attributes/tenants.yaml
 ```
 
-`pdp:` is a sequence, one block per decision point. `session_store:`
+`pdp:` is a sequence, one block per decision point. An entry may carry
+an optional `cache:` block with positive `ttl_seconds` and
+`max_entries` (keep the cap modest; removal is `O(n)`); omission
+leaves evaluation uncached. See
+[PDP decision cache](../pdp-decision-cache.md). `session_store:`
 selects where Session Taint labels live; without it, labels stay in an
 in-process memory store and do not survive a reload or reach a second
 replica. `attribute_files:` loads the operator-maintained tree policy
@@ -234,12 +239,23 @@ secrets:
     session_password: { provider: shell, ref: VALKEY_PASSWORD }
 ```
 
-Two provider kinds need no dependencies and ship in the engine:
+Two provider kinds need no dependencies and ship in the engine. They are not
+registered on their own: the host installs
+`SecretProviderRegistry::with_builtin_backends()` with
+`PolicyEngine::set_secret_providers` before `initialize`, and a document naming
+a kind no registered factory provides fails there, naming the kind.
 
 | kind | `ref` is | notes |
 |---|---|---|
-| `file` | a path | With `base_dir`, a reference must be relative and may not contain `..`. One trailing newline is stripped. An empty file is an error, not an empty value. |
-| `env` | a variable name | A process's environment is fixed at exec, so these never rotate without a restart. |
+| `file` | a path | With `base_dir`, a reference must be relative, may not contain `..`, and must resolve inside the directory once symlinks are followed. One trailing newline is stripped. An empty file is an error, not an empty value. |
+| `env` | a variable name | Takes no settings; any key is refused. A process's environment is fixed at exec, so these never rotate without a restart. |
+
+`base_dir` containment holds against the file a reference reaches, not just
+against the reference as written, so a link below the directory cannot read
+outside it. Links that stay inside are followed normally, which is what a
+Kubernetes Secret volume and a CSI-projected secret both need: their `..data`
+indirection and the timestamped directory behind it are symlinks within the
+mount. `base_dir` may itself be a symlink.
 
 `file` covers Kubernetes Secret volumes, CSI-projected secrets, container
 secret mounts, and a Vault Agent sidecar templating to disk, so a
@@ -317,10 +333,45 @@ process that never rotates a credential and never says so.
 
 A value that fails to re-read keeps its last-good bytes, so a backend
 outage after startup degrades to a possibly-stale credential rather than
-to none. The returned report names every failure, and
-`provider_last_success()` is the staleness signal to alarm on. The
-interval a host picks is therefore the upper bound on how long a revoked
-credential stays in use.
+to none. The returned report names every failure. The interval a host
+picks is therefore the upper bound on how long a revoked credential
+stays in use.
+
+`PolicyEngine::secrets_last_success(provider)` is the staleness signal to
+alarm on: the gap between it and now is how long the credentials in memory
+have gone unconfirmed against the backend. It is kept across a failure, so a
+provider that has been failing for an hour still reports the success from
+before it started failing.
+
+`PolicyEngine::secrets_health(provider)` answers the other questions, as three
+variants: `Uninitialized` (no store resolved, so nothing is being refreshed),
+`Undeclared` (the document declares no such provider, so an alarm on that name
+is watching nothing), or `Resolved` carrying the last success, the most recent
+failure and its reason, and whether the most recent refresh failed. That last
+flag is the fourth condition: it separates a provider failing right now from one
+that is healthy. The last failure is kept after recovery, so a flapping provider
+stays visible as one.
+
+A consumer that has to act on rotation rather than just read the new bytes
+reads `SecretRef::snapshot()`, which returns the value and its generation from
+one load, and rebuilds whatever it built when a later snapshot reports a higher
+generation. Reading `get()` and `generation()` separately can straddle a
+refresh and pair old bytes with the new generation, and nothing moves the
+generation again until the value changes once more.
+
+### Secrets and reload
+
+Secrets are resolved once, during `initialize()`. A reload whose `secrets:`
+block differs from the resolved one is refused, naming the declaration that
+changed, and the running configuration and its credentials keep serving.
+Adding, removing, or repointing a declaration therefore takes a restart.
+
+Rotating the bytes behind an existing reference is unaffected: that is what
+`refresh_secrets()` is for, and the reference does not change.
+
+A host that reloads by constructing a new engine, loading the document into it,
+and calling `initialize()` sees none of this, since nothing is resolved yet at
+load time.
 
 ### Per-plugin secret sources
 
