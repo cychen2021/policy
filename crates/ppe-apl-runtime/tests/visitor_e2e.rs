@@ -1269,9 +1269,9 @@ fn llm_ext(request: Option<LLMRequest>, roles: &[&str]) -> Extensions {
         security: Some(Arc::new(security)),
         llm: Some(Arc::new(LLMExtension {
             model_id: Some("gpt-4".into()),
-            request,
             ..Default::default()
         })),
+        llm_request_parts: request.map(Arc::new),
         ..Default::default()
     }
 }

@@ -26,18 +26,19 @@ pub struct LLMExtension {
     /// Model capabilities (e.g., "`tool_use`", "vision", "streaming").
     #[serde(default)]
     pub capabilities: Vec<String>,
-
-    /// What this request asks of the model, when the host can see it.
-    ///
-    /// `None` means the host did not report the request, which is not the
-    /// same as a request that offers no tools and sets no parameters. A
-    /// gateway on a provider HTTP API reads all of this from the request
-    /// body; an in-process hook may see only part of it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request: Option<LLMRequest>,
 }
 
 /// The parts of an LLM request that are not the conversation itself.
+///
+/// Carried on `Extensions.llm_request_parts`, not on [`LLMExtension`], so a
+/// plugin sees it only with `read_llm_request`, and it is never serialized.
+/// `None` there means the host did not report the request, which is not the
+/// same as a request that offers no tools and sets no parameters.
+///
+/// A present request claims the host saw all of it: `offered_tools` lists
+/// every tool the provider will expose, and `system_prompt` holds every
+/// system and developer instruction. A host that cannot list everything
+/// leaves the slot `None`.
 ///
 /// Every field is optional because providers name and default them
 /// differently: an absent field means the request did not set it, and the
@@ -158,37 +159,22 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// A host that does not report the request still produces a valid
-    /// extension, and the request stays `None` rather than defaulting to an
-    /// empty one: the two mean different things to a policy.
-    #[test]
-    fn absent_request_stays_none() {
-        let llm: LLMExtension = serde_json::from_value(json!({ "model_id": "gpt-4" })).unwrap();
-        assert!(llm.request.is_none());
-        let back = serde_json::to_value(&llm).unwrap();
-        assert!(back.get("request").is_none(), "None is not serialized");
-    }
-
     #[test]
     fn a_full_request_round_trips() {
         let wire = json!({
-            "model_id": "gpt-4",
-            "request": {
-                "system_prompt": "You are a helpful assistant.",
-                "offered_tools": [
-                    { "name": "send_email", "description": "Send an email" },
-                    { "name": "search", "server_id": "web" }
-                ],
-                "tool_choice": { "type": "tool", "name": "search" },
-                "max_tokens": 1024,
-                "temperature": 0.2,
-                "top_p": 0.9,
-                "stop_sequences": ["\n\nHuman:"],
-                "stream": true
-            }
+            "system_prompt": "You are a helpful assistant.",
+            "offered_tools": [
+                { "name": "send_email", "description": "Send an email" },
+                { "name": "search", "server_id": "web" }
+            ],
+            "tool_choice": { "type": "tool", "name": "search" },
+            "max_tokens": 1024,
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "stop_sequences": ["\n\nHuman:"],
+            "stream": true
         });
-        let llm: LLMExtension = serde_json::from_value(wire.clone()).unwrap();
-        let req = llm.request.as_ref().expect("request present");
+        let req: LLMRequest = serde_json::from_value(wire.clone()).unwrap();
         assert_eq!(
             req.system_prompt.as_deref(),
             Some("You are a helpful assistant.")
@@ -205,16 +191,13 @@ mod tests {
         assert_eq!(req.temperature, Some(0.2));
         assert_eq!(req.stream, Some(true));
 
-        // Serialization adds defaulted fields (`capabilities`, a tool's
-        // `annotations`), so compare a second trip against the first rather
-        // than against the input.
-        let once = serde_json::to_value(&llm).unwrap();
-        let again: LLMExtension = serde_json::from_value(once.clone()).unwrap();
+        // Serialization adds defaulted fields (a tool's `annotations`), so
+        // compare a second trip against the first rather than against the
+        // input.
+        let once = serde_json::to_value(&req).unwrap();
+        let again: LLMRequest = serde_json::from_value(once.clone()).unwrap();
         assert_eq!(serde_json::to_value(&again).unwrap(), once);
-        assert_eq!(
-            once["request"]["tool_choice"],
-            wire["request"]["tool_choice"]
-        );
+        assert_eq!(once["tool_choice"], wire["tool_choice"]);
     }
 
     /// The tag values are what a host writes, so they are pinned.

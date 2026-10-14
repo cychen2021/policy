@@ -68,7 +68,8 @@ on `cmf.llm_output`.
 | `agent.conversation.topics` | StringSet | always present when a conversation is |
 
 Every `llm.*` key from `llm.offered_tools` down comes from
-`LLMExtension.request`, and exists only when the host reported the request.
+`Extensions.llm_request_parts`, and exists only when the host reported the
+request.
 Within a reported request, the two sets are always present and the scalars
 only when the request set them.
 
@@ -92,8 +93,10 @@ host passes those extensions on `cmf.llm_output`.
 Identity (`subject.*`, `role.*`, `perm.*`, `claim.*`), security labels, the
 delegation chain, and entity metadata (`meta.*`) are the same on an `llm:` route
 as on any other. [Extensions](extensions.md) lists them with the capabilities
-that expose them. `llm.*` and `completion.*` need no capability, and a route
-grants `read_agent` by default.
+that expose them. Model identity (`llm.model_id`, `llm.provider`,
+`llm.capabilities`) and `completion.*` need no capability. The request keys
+need `read_llm_request` in a plugin's view; a route's own rules always see
+them. A route grants `read_agent` by default.
 
 ### The message text is a string
 
@@ -131,8 +134,8 @@ on the same value and is how a whole message is redacted.
   `reference/plugins/transcript-scanner` is that plugin. It denies with
   `transcript.detected` and refuses to load without `read_agent`.
 - **The system prompt's text.** Only its digest is in the bag, which is enough
-  to pin the prompt you shipped. A plugin reads the text from
-  `LLMExtension.request`.
+  to pin the prompt you shipped. A plugin that declares `read_llm_request`
+  reads the text from `Extensions.llm_request_parts`.
 - **Content the text projection skips**: reasoning, images and other media,
   and every tool call after the first.
 
@@ -155,8 +158,9 @@ A policy that must not pass a request it cannot see adds the last rule.
 
 - Set `meta.entity_type` to `llm` and `meta.entity_name` to the model on both
   hooks, or no `llm:` route matches.
-- Set `LLMExtension.request` when the request body is visible, and leave it
-  `None` when it is not. An empty request claims the model was offered no tools.
+- Set `Extensions.llm_request_parts` when the request body is visible, and
+  leave it `None` when it is not. An empty request claims the model was offered
+  no tools.
 - Set `CompletionExtension` on `cmf.llm_output`.
 - Carry history as CMF messages in `AgentExtension.conversation.history` if a
   history plugin is configured.

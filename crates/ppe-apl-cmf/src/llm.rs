@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// LLMExtension → AttributeBag.
+// LLMExtension and the typed LLM request → AttributeBag.
 //
 // Namespace:
 //   llm.model_id              : String
 //   llm.provider              : String
 //   llm.capabilities          : StringSet (always present, empty rather than absent)
 //
-// From `LLMExtension.request`, only when the host reported one:
+// From `Extensions.llm_request_parts`, only when the host reported one:
 //   llm.offered_tools         : StringSet of tool names (always, when `request` is present)
 //   llm.stop_sequences        : StringSet (always, when `request` is present)
 //   llm.tool_choice           : String — `auto`, `none`, `required`, or `tool`
@@ -19,13 +19,14 @@
 //   llm.stream                : Bool
 //   llm.system_prompt_digest  : String, `sha256:<hex>` of the prompt's UTF-8 bytes
 //
-// An absent `request` writes none of these, so a predicate on one of them
+// An absent request writes none of these, so a predicate on one of them
 // reads a missing key. That is deliberate: "the host could not see the
 // request" must not look like "the request offered no tools".
 //
 // The system prompt itself is not bridged. The digest is enough to pin a
 // known prompt (`llm.system_prompt_digest != 'sha256:…': deny`), and a plugin
-// that needs the text reads it from the extension.
+// that needs the text reads `Extensions.llm_request_parts`, which takes
+// `read_llm_request`.
 //
 // The forced tool name is its own key rather than `llm.tool_choice.name`:
 // a key that is both a leaf and a namespace prefix collides in the CEL and
@@ -36,7 +37,13 @@ use praxis_policy_core::extensions::{LLMExtension, LLMRequest, ToolChoice};
 use sha2::{Digest as _, Sha256};
 use std::collections::HashSet;
 
-/// Write model identity, and the request when present, into the bag.
+use crate::constants::{
+    BAG_LLM_FORCED_TOOL, BAG_LLM_MAX_TOKENS, BAG_LLM_OFFERED_TOOLS, BAG_LLM_STOP_SEQUENCES,
+    BAG_LLM_STREAM, BAG_LLM_SYSTEM_PROMPT_DIGEST, BAG_LLM_TEMPERATURE, BAG_LLM_TOOL_CHOICE,
+    BAG_LLM_TOP_P,
+};
+
+/// Write model identity into the bag.
 pub fn extract_llm(llm: &LLMExtension, bag: &mut AttributeBag) {
     if let Some(v) = &llm.model_id {
         bag.set("llm.model_id", v.clone());
@@ -48,18 +55,15 @@ pub fn extract_llm(llm: &LLMExtension, bag: &mut AttributeBag) {
     // `security.rs`, which documents the rule for the whole bridge.
     let caps: HashSet<String> = llm.capabilities.iter().cloned().collect();
     bag.set("llm.capabilities", caps);
-
-    if let Some(req) = &llm.request {
-        extract_request(req, bag);
-    }
 }
 
-fn extract_request(req: &LLMRequest, bag: &mut AttributeBag) {
+/// Write what the request asks of the model into the bag.
+pub fn extract_llm_request(req: &LLMRequest, bag: &mut AttributeBag) {
     // Sets follow the empty-set rule within a present request.
     let offered: HashSet<String> = req.offered_tools.iter().map(|t| t.name.clone()).collect();
-    bag.set("llm.offered_tools", offered);
+    bag.set(BAG_LLM_OFFERED_TOOLS, offered);
     let stops: HashSet<String> = req.stop_sequences.iter().cloned().collect();
-    bag.set("llm.stop_sequences", stops);
+    bag.set(BAG_LLM_STOP_SEQUENCES, stops);
 
     if let Some(choice) = &req.tool_choice {
         let mode = match choice {
@@ -67,26 +71,26 @@ fn extract_request(req: &LLMRequest, bag: &mut AttributeBag) {
             ToolChoice::None => "none",
             ToolChoice::Required => "required",
             ToolChoice::Tool { name } => {
-                bag.set("llm.forced_tool", name.clone());
+                bag.set(BAG_LLM_FORCED_TOOL, name.clone());
                 "tool"
             },
         };
-        bag.set("llm.tool_choice", mode);
+        bag.set(BAG_LLM_TOOL_CHOICE, mode);
     }
     if let Some(v) = req.max_tokens {
-        bag.set("llm.max_tokens", i64::from(v));
+        bag.set(BAG_LLM_MAX_TOKENS, i64::from(v));
     }
     if let Some(v) = req.temperature {
-        bag.set("llm.temperature", v);
+        bag.set(BAG_LLM_TEMPERATURE, v);
     }
     if let Some(v) = req.top_p {
-        bag.set("llm.top_p", v);
+        bag.set(BAG_LLM_TOP_P, v);
     }
     if let Some(v) = req.stream {
-        bag.set("llm.stream", v);
+        bag.set(BAG_LLM_STREAM, v);
     }
     if let Some(prompt) = &req.system_prompt {
-        bag.set("llm.system_prompt_digest", sha256_ref(prompt));
+        bag.set(BAG_LLM_SYSTEM_PROMPT_DIGEST, sha256_ref(prompt));
     }
 }
 
@@ -111,7 +115,8 @@ fn sha256_ref(text: &str) -> String {
 )]
 mod tests {
     use super::*;
-    use praxis_policy_core::extensions::ToolMetadata;
+    use praxis_policy_core::extensions::{Extensions, ToolMetadata};
+    use std::sync::Arc;
 
     fn tool(name: &str) -> ToolMetadata {
         ToolMetadata {
@@ -120,14 +125,19 @@ mod tests {
         }
     }
 
+    /// Through the whole bridge, so the tests also cover how the two slots
+    /// combine.
     fn bag_for(request: Option<LLMRequest>) -> AttributeBag {
-        let llm = LLMExtension {
-            model_id: Some("gpt-4".into()),
-            request,
+        let ext = Extensions {
+            llm: Some(Arc::new(LLMExtension {
+                model_id: Some("gpt-4".into()),
+                ..Default::default()
+            })),
+            llm_request_parts: request.map(Arc::new),
             ..Default::default()
         };
         let mut bag = AttributeBag::new();
-        extract_llm(&llm, &mut bag);
+        crate::extract_extensions(&ext, &mut bag);
         bag
     }
 
@@ -137,7 +147,6 @@ mod tests {
             model_id: Some("gpt-4".into()),
             provider: Some("openai".into()),
             capabilities: vec!["tool_use".into(), "vision".into()],
-            ..Default::default()
         };
         let mut bag = AttributeBag::new();
         extract_llm(&llm, &mut bag);

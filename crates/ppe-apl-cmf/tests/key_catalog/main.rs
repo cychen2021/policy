@@ -169,21 +169,21 @@ fn fully_populated() -> Extensions {
         model_id: Some("gpt-4".to_owned()),
         provider: Some("openai".to_owned()),
         capabilities: vec!["tools".to_owned()],
-        request: Some(LLMRequest {
-            system_prompt: Some("prompt".to_owned()),
-            offered_tools: vec![ToolMetadata {
-                name: "search".to_owned(),
-                ..Default::default()
-            }],
-            tool_choice: Some(ToolChoice::Tool {
-                name: "search".to_owned(),
-            }),
-            max_tokens: Some(1024),
-            temperature: Some(0.5),
-            top_p: Some(0.9),
-            stop_sequences: vec!["END".to_owned()],
-            stream: Some(true),
+    };
+    let llm_request_parts = LLMRequest {
+        system_prompt: Some("prompt".to_owned()),
+        offered_tools: vec![ToolMetadata {
+            name: "search".to_owned(),
+            ..Default::default()
+        }],
+        tool_choice: Some(ToolChoice::Tool {
+            name: "search".to_owned(),
         }),
+        max_tokens: Some(1024),
+        temperature: Some(0.5),
+        top_p: Some(0.9),
+        stop_sequences: vec!["END".to_owned()],
+        stream: Some(true),
     };
     let mcp = MCPExtension {
         tool: Some(ToolMetadata {
@@ -250,6 +250,7 @@ fn fully_populated() -> Extensions {
         request: Some(Arc::new(request)),
         http: Some(Arc::new(http)),
         llm: Some(Arc::new(llm)),
+        llm_request_parts: Some(Arc::new(llm_request_parts)),
         mcp: Some(Arc::new(mcp)),
         completion: Some(Arc::new(completion)),
         provenance: Some(Arc::new(provenance)),
@@ -517,14 +518,14 @@ fn duplicate_documented_keys_are_rejected() {
 /// Each key the per-slot tables list, with the type and the section they give
 /// it, normalized to the catalog's spelling.
 ///
-/// Only the tables under "The twelve slots" are read. The payload tables after
+/// Only the tables under "The thirteen slots" are read. The payload tables after
 /// it describe `args.*`, `result.*` and `data.*`, which the payload flattener
 /// writes and this bridge does not.
 fn documented() -> HashMap<String, Documented> {
     let text = std::fs::read_to_string(docs_path()).expect("the catalog page reads");
     let section = text
-        .split_once("## The twelve slots")
-        .expect("the per-slot section is still titled 'The twelve slots'")
+        .split_once("## The thirteen slots")
+        .expect("the per-slot section is still titled 'The thirteen slots'")
         .1
         .split_once("## Payloads that are not slots")
         .expect("the payload section still follows the slots")

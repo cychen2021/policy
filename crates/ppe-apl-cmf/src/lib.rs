@@ -93,7 +93,7 @@ pub use delegation::extract_delegation;
 pub use extensions_bridge::extract_extensions;
 pub use framework::extract_framework;
 pub use http::extract_http;
-pub use llm::extract_llm;
+pub use llm::{extract_llm, extract_llm_request};
 pub use mcp::extract_mcp;
 pub use meta::extract_meta;
 pub use payload::{extract_args, extract_data, extract_result};
