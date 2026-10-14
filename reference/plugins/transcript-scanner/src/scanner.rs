@@ -110,8 +110,21 @@ impl TranscriptScanner {
                 content.arguments.values().find_map(|v| self.match_value(v))
             },
             ContentPart::ToolResult { content } => self.match_value(&content.content),
-            // Media and resource parts carry no scannable text of their own.
-            _ => None,
+            ContentPart::Resource { content } => {
+                content.content.as_deref().and_then(|t| self.match_str(t))
+            },
+            ContentPart::PromptResult { content } => content
+                .content
+                .as_deref()
+                .and_then(|t| self.match_str(t))
+                .or_else(|| content.messages.iter().find_map(|m| self.match_turn(m))),
+            // Media parts and resource references carry a URL or an encoded
+            // payload, not text.
+            ContentPart::ResourceRef { .. }
+            | ContentPart::Image { .. }
+            | ContentPart::Video { .. }
+            | ContentPart::Audio { .. }
+            | ContentPart::Document { .. } => None,
         })
     }
 
@@ -192,7 +205,7 @@ impl HookHandler<CmfHook> for TranscriptScanner {
 )]
 mod tests {
     use super::*;
-    use praxis_policy_core::cmf::{ToolCall, ToolResult};
+    use praxis_policy_core::cmf::{PromptResult, Resource, ToolCall, ToolResult};
     use praxis_policy_core::extensions::{AgentExtension, ConversationContext};
     use praxis_policy_core::plugin::{OnError, PluginMode};
     use serde_json::json;
@@ -327,6 +340,55 @@ mod tests {
         )
         .await;
         assert!(!r.continue_processing, "a nested tool result is scanned");
+    }
+
+    /// A `.env` file pulled in as an MCP resource on an earlier turn, and a
+    /// rendered prompt, carry text too.
+    #[tokio::test]
+    async fn resource_and_prompt_text_is_scanned() {
+        let resource = Message::with_content(
+            Role::Tool,
+            vec![ContentPart::Resource {
+                content: Resource {
+                    uri: "file:///app/.env".into(),
+                    content: Some(format!("API_KEY={SECRET}")),
+                    ..Default::default()
+                },
+            }],
+        );
+        let r = run(
+            &scanner(&[]),
+            &payload("hi"),
+            &ext_with_history(vec![resource]),
+        )
+        .await;
+        assert!(!r.continue_processing, "an embedded resource is scanned");
+
+        let prompt = |content: Option<String>, messages: Vec<Message>| {
+            Message::with_content(
+                Role::User,
+                vec![ContentPart::PromptResult {
+                    content: PromptResult {
+                        prompt_request_id: "pr".into(),
+                        prompt_name: "setup".into(),
+                        messages,
+                        content,
+                        is_error: false,
+                        error_message: None,
+                    },
+                }],
+            )
+        };
+        for (what, turn) in [
+            ("rendered content", prompt(Some(SECRET.to_owned()), vec![])),
+            (
+                "rendered messages",
+                prompt(None, vec![Message::text(Role::User, SECRET)]),
+            ),
+        ] {
+            let r = run(&scanner(&[]), &payload("hi"), &ext_with_history(vec![turn])).await;
+            assert!(!r.continue_processing, "a prompt's {what} is scanned");
+        }
     }
 
     #[tokio::test]
